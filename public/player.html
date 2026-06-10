@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player Screen — GM Campaign Cockpit</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23211b16%22/><text x=%225%22 y=%2222%22 fill=%22%23f0b865%22 font-family=%22serif%22 font-size=%2217%22>PL</text></svg>">
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/player.css">
+  </head>
+  <body class="player-body">
+    <main class="player-shell">
+      <section id="holding" class="player-holding">
+        <div class="player-holding-inner">
+          <div class="player-mark">PL</div>
+          <h1>At The Table</h1>
+          <p>Waiting for the DM to share something…</p>
+        </div>
+      </section>
+
+      <div id="player-deck" class="player-deck hidden">
+        <nav id="player-tabs" class="player-tabs" aria-label="Shared content"></nav>
+        <article id="stage" class="player-stage markdown-body"></article>
+      </div>
+
+      <aside class="player-chat" aria-label="Table chat">
+        <div class="player-chat-head">
+          <strong id="player-identity">Player</strong>
+          <button id="player-rename" type="button" class="ghost-button-sm">Change name</button>
+        </div>
+        <div id="chat-log" class="player-chat-log"></div>
+        <form id="chat-form" class="player-chat-form">
+          <input id="chat-input" type="text" placeholder="Message the table..." maxlength="2000" autocomplete="off">
+          <button type="submit">Send</button>
+        </form>
+      </aside>
+    </main>
+
+    <div id="name-overlay" class="name-overlay">
+      <form id="name-form" class="name-card">
+        <h2>What's your name at the table?</h2>
+        <p>This shows up in chat and lets the DM whisper to you.</p>
+        <input id="name-input" type="text" placeholder="e.g. Tav" maxlength="60" autocomplete="off" required>
+        <button type="submit">Join the table</button>
+      </form>
+    </div>
+
+    <div id="player-toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script type="module" src="/player.js"></script>
+  </body>
+</html>

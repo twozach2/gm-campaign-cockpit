@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GM Campaign Cockpit</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23211b16%22/><text x=%225%22 y=%2222%22 fill=%22%23f0b865%22 font-family=%22serif%22 font-size=%2217%22>GM</text></svg>">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark">GM</span>
+          <div>
+            <strong>Campaign Cockpit</strong>
+            <span>Obsidian vault runner</span>
+          </div>
+        </div>
+        <div class="session-identity">
+          <span id="campaign-name">Loading vault...</span>
+          <strong id="session-name"></strong>
+        </div>
+        <div class="save-state" id="save-state" aria-live="polite">Local vault</div>
+      </header>
+
+      <aside class="sidebar">
+        <label class="field">
+          <span>Campaign</span>
+          <select id="campaign-select"></select>
+        </label>
+        <label class="field">
+          <span>Session</span>
+          <select id="session-select"></select>
+        </label>
+
+        <div class="sidebar-label">Run Of Show</div>
+        <nav id="scene-nav" class="scene-nav" aria-label="Session scenes"></nav>
+
+        <section class="rail-section references-section sidebar-references">
+          <div class="rail-heading">
+            <div>
+              <span class="eyebrow">At The Table</span>
+              <h2>References</h2>
+            </div>
+            <button id="close-reference" class="icon-button hidden" type="button" aria-label="Close reference">×</button>
+          </div>
+          <input id="reference-search" class="reference-search" type="search" placeholder="Search all campaign files..." autocomplete="off">
+          <div id="reference-list" class="reference-list"></div>
+          <article id="reference-view" class="reference-view markdown-body hidden"></article>
+        </section>
+
+        <button id="validate-button" class="sidebar-action" type="button">Check documents</button>
+
+        <div class="sidebar-footer">
+          <span class="pulse"></span>
+          <span>Files read live from the vault</span>
+        </div>
+      </aside>
+
+      <div class="col-resizer" data-resize="sidebar" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
+
+      <main class="main-panel">
+        <div class="panel-toolbar">
+          <button id="overview-button" class="ghost-button active" type="button">Session brief</button>
+          <div class="scene-counter" id="scene-counter"></div>
+        </div>
+        <article id="content" class="markdown-body">
+          <div class="loading-card">Reading campaign files...</div>
+        </article>
+      </main>
+
+      <div class="col-resizer" data-resize="rail" role="separator" aria-orientation="vertical" aria-label="Resize right rail"></div>
+
+      <aside class="right-rail">
+        <section class="rail-section notes-section">
+          <div class="rail-heading">
+            <div>
+              <span class="eyebrow">Workbook</span>
+              <h2>Live notes</h2>
+            </div>
+            <button id="save-notes" class="save-button" type="button">Save</button>
+          </div>
+          <div class="notes-view-toggle" role="group" aria-label="Notes view">
+            <button type="button" data-notes-view="write" aria-pressed="false">Write</button>
+            <button type="button" data-notes-view="split" aria-pressed="true">Split</button>
+            <button type="button" data-notes-view="preview" aria-pressed="false">Preview</button>
+          </div>
+          <div id="notes-workspace" class="notes-workspace" data-view="split">
+            <textarea id="notes" spellcheck="true" placeholder="Capture decisions, damage, discoveries, and next-session hooks..."></textarea>
+            <article id="notes-preview" class="notes-preview markdown-body" aria-label="Formatted notes preview"></article>
+          </div>
+          <p class="notes-hint" id="notes-hint">⌘/Ctrl+S saves into the protected notes block.</p>
+        </section>
+
+        <div class="row-resizer" data-resize="rail-row" role="separator" aria-orientation="horizontal" aria-label="Resize notes panel"></div>
+
+        <section class="rail-section player-screen-section">
+          <div class="rail-heading">
+            <div>
+              <span class="eyebrow">Broadcast</span>
+              <h2>Player Screen</h2>
+            </div>
+            <span id="player-count" class="player-count">0 connected</span>
+          </div>
+          <div id="push-cards" class="push-cards"></div>
+          <textarea id="push-text" class="push-text" placeholder="Push a note to the table..."></textarea>
+          <div class="push-actions">
+            <button id="push-text-button" type="button">Push note</button>
+            <button id="clear-screen" type="button" class="ghost-button">Clear screen</button>
+          </div>
+          <div id="revealed-wrap" class="revealed-wrap hidden">
+            <div class="revealed-head">
+              <span class="eyebrow">On The Player Screen</span>
+              <span id="revealed-count" class="revealed-count">0</span>
+            </div>
+            <div id="revealed-list" class="revealed-list" aria-label="Currently revealed items"></div>
+          </div>
+          <div class="table-chat">
+            <div id="chat-log-dm" class="chat-log"></div>
+            <input id="chat-input-dm" type="text" placeholder="Message the table..." maxlength="2000" autocomplete="off">
+            <div class="whisper-composer">
+              <select id="whisper-target"></select>
+              <input id="whisper-text" type="text" placeholder="Whisper..." maxlength="2000" autocomplete="off">
+              <button id="whisper-send" type="button">Whisper</button>
+            </div>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <div id="validate-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="validate-title">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div>
+            <span class="eyebrow">Document check</span>
+            <h2 id="validate-title">Campaign validation</h2>
+          </div>
+          <button id="validate-close" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+        <div id="validate-body" class="validate-body"></div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
