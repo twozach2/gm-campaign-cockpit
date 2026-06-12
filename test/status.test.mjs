@@ -1,6 +1,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -46,7 +47,11 @@ before(async () => {
 });
 
 after(async () => {
-  child?.kill();
+  if (child && child.exitCode === null) {
+    const exited = once(child, "exit");
+    child.kill("SIGTERM");
+    await exited;
+  }
   if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
 });
 

@@ -52,6 +52,9 @@ coverage/
 *.tsbuildinfo
 
 # --- Local notes that shouldn't be public ---
+# Private implementation plan used during local development.
+.plan
+
 # Uncomment if you ever drop personal notes into the repo root.
 # NOTES.md
 # TODO.md

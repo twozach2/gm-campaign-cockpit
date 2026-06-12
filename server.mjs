@@ -1,10 +1,15 @@
 import { createServer } from "node:http";
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { randomInt } from "node:crypto";
+import { AtomicJsonStore } from "./lib/atomic-json-store.mjs";
 import { Vault } from "./lib/vault.mjs";
+import {
+  acknowledgeNoteOperation,
+  parseNoteOperation,
+} from "./lib/note-operation.mjs";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
 const vaultRoot = path.resolve(process.env.VAULT_ROOT || path.join(appRoot, ".."));
@@ -46,23 +51,72 @@ const status = {
   updatedAt: Date.now(),
 };
 let trackerSeq = 0;
+let shuttingDown = false;
 
-async function loadTrackers() {
-  try {
-    const saved = JSON.parse(await readFile(TRACKERS_FILE, "utf8"));
-    if (Array.isArray(saved.trackers)) {
-      status.trackers = saved.trackers;
-      trackerSeq = status.trackers.reduce((max, t) => Math.max(max, Number(t.id) || 0), 0);
-    }
-  } catch {
-    /* no saved trackers yet */
+function isTracker(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !Number.isSafeInteger(value.id) ||
+    value.id < 1 ||
+    typeof value.name !== "string" ||
+    !value.name.trim() ||
+    value.name.length > 80 ||
+    typeof value.hidden !== "boolean"
+  ) {
+    return false;
   }
+  if (value.type === "initiative") {
+    return (
+      Array.isArray(value.entries) &&
+      value.entries.length <= 40 &&
+      value.entries.every(
+        (entry) =>
+          typeof entry === "string" &&
+          Boolean(entry.trim()) &&
+          entry.length <= 60,
+      ) &&
+      Number.isSafeInteger(value.turn) &&
+      value.turn >= 0 &&
+      value.turn <= Math.max(0, value.entries.length - 1)
+    );
+  }
+  return (
+    (value.type === "clock" || value.type === "meter") &&
+    Number.isSafeInteger(value.max) &&
+    value.max >= 1 &&
+    value.max <= 1000 &&
+    Number.isSafeInteger(value.value) &&
+    value.value >= 0 &&
+    value.value <= value.max
+  );
 }
 
-function saveTrackers() {
-  mkdir(path.dirname(TRACKERS_FILE), { recursive: true })
-    .then(() => writeFile(TRACKERS_FILE, JSON.stringify({ trackers: status.trackers }, null, 2)))
-    .catch((error) => console.error(`Failed to save trackers: ${error.message}`));
+function isTrackerState(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    !Array.isArray(value.trackers) ||
+    !value.trackers.every(isTracker)
+  ) {
+    return false;
+  }
+  const ids = new Set(value.trackers.map((tracker) => tracker.id));
+  return ids.size === value.trackers.length;
+}
+
+const trackerStore = new AtomicJsonStore({
+  file: TRACKERS_FILE,
+  validate: isTrackerState,
+});
+
+async function loadTrackers() {
+  const saved = await trackerStore.load({ trackers: [] });
+  status.trackers = saved.trackers;
+  trackerSeq = status.trackers.reduce(
+    (max, tracker) => Math.max(max, tracker.id),
+    0,
+  );
 }
 
 function statusFor(role) {
@@ -70,12 +124,12 @@ function statusFor(role) {
   return { trackers: status.trackers.filter((t) => !t.hidden), updatedAt: status.updatedAt };
 }
 
-function emitStatus() {
+async function emitStatus() {
   status.updatedAt = Date.now();
+  await trackerStore.write({ trackers: status.trackers });
   for (const client of clients) {
     writeEvent(client, "status-set", statusFor(client.role));
   }
-  saveTrackers();
 }
 
 function emitPresentation() {
@@ -453,7 +507,7 @@ async function api(request, response, url) {
       }
       tracker.value = Math.max(0, Math.min(tracker.max, tracker.value));
     }
-    emitStatus();
+    await emitStatus();
     return sendJson(response, 200, { ok: true, tracker });
   }
 
@@ -465,7 +519,7 @@ async function api(request, response, url) {
     if (status.trackers.length === before) {
       return sendJson(response, 404, { error: "Tracker not found" });
     }
-    emitStatus();
+    await emitStatus();
     return sendJson(response, 200, { ok: true });
   }
 
@@ -523,11 +577,16 @@ async function api(request, response, url) {
     return sendJson(response, 200, await vault.validateAll());
   }
   if (request.method === "POST" && url.pathname === "/api/notes") {
-    const body = await readJson(request);
+    const operation = parseNoteOperation(await readJson(request));
+    const result = await vault.saveNotes(
+      operation.campaign,
+      operation.session,
+      operation.notes,
+    );
     return sendJson(
       response,
       200,
-      await vault.saveNotes(body.campaign, Number(body.session), body.notes),
+      acknowledgeNoteOperation(operation, result),
     );
   }
   return sendJson(response, 404, { error: "API route not found" });
@@ -559,6 +618,9 @@ async function staticFile(request, response, url) {
 
 const server = createServer(async (request, response) => {
   try {
+    if (shuttingDown) {
+      return sendJson(response, 503, { error: "Server is shutting down" });
+    }
     const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
     if (url.pathname.startsWith("/api/")) {
       await api(request, response, url);
@@ -572,6 +634,62 @@ const server = createServer(async (request, response) => {
       sendJson(response, status, { error: error.message || "Unexpected server error" });
     }
   }
+});
+
+function closeStreams() {
+  for (const client of clients) {
+    try {
+      client.response.end();
+    } catch {
+      // The stream is already closed.
+    }
+  }
+  clients.clear();
+}
+
+function closeHttpServer() {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; finishing pending writes...`);
+  const timeout = setTimeout(() => {
+    console.error("Shutdown timed out before persistence completed.");
+    server.closeAllConnections?.();
+    process.exit(1);
+  }, 5_000);
+
+  try {
+    closeStreams();
+    await closeHttpServer();
+    await Promise.all([trackerStore.close(), vault.flushWrites()]);
+    clearTimeout(timeout);
+    console.log("Shutdown complete.");
+    if (process.connected) process.disconnect();
+  } catch (error) {
+    clearTimeout(timeout);
+    console.error(`Shutdown failed: ${error.message}`);
+    process.exitCode = 1;
+    if (process.connected) process.disconnect();
+  }
+}
+
+process.once("SIGINT", () => {
+  void shutdown("SIGINT");
+});
+process.once("SIGTERM", () => {
+  void shutdown("SIGTERM");
+});
+process.on("message", (message) => {
+  if (message?.type === "shutdown") void shutdown("parent request");
 });
 
 function lanAddress() {

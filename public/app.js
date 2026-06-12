@@ -1,4 +1,8 @@
 import { renderMarkdown, escapeHtml, IMAGE_EXT, feedEntryHtml, trackerHtml, rollHtml } from "/render.mjs";
+import {
+  createNotesSaveCoordinator,
+  selectInitialSession,
+} from "/notes-save.mjs";
 
 const state = {
   campaigns: [],
@@ -6,6 +10,8 @@ const state = {
   session: null,
   selectedScene: null,
   notesDirty: false,
+  notesSaving: false,
+  notesSaveError: null,
   documents: [],
   currentLinks: [],
   lastSavedAt: null,
@@ -75,6 +81,32 @@ async function request(url, options = {}) {
   if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
   return data;
 }
+
+const notesSaver = createNotesSaveCoordinator({
+  getSnapshot: () => {
+    if (!state.session) return null;
+    return {
+      contextKey: `${state.session.campaign.id}:${state.session.number}`,
+      campaign: state.session.campaign.id,
+      session: state.session.number,
+      notes: elements.notes.value,
+    };
+  },
+  saveSnapshot: (operation) =>
+    request("/api/notes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(operation),
+    }),
+  onStateChange: (saveState) => {
+    state.notesDirty = saveState.dirty;
+    state.notesSaving = saveState.saving;
+    state.notesSaveError = saveState.lastError;
+    state.lastSavedAt = saveState.lastSavedAt;
+    if (elements.saveNotes) elements.saveNotes.disabled = saveState.saving;
+    if (elements.saveState) renderSaveState();
+  },
+});
 
 function fileUrl(file) {
   const campaign = state.session?.campaign?.id || "";
@@ -151,12 +183,10 @@ async function loadSessions(campaignId) {
 
   await loadDocuments(campaignId);
 
-  const storedNumber = Number(readStored(STORAGE.session(campaignId)));
-  const highest = sessions.reduce(
-    (max, session) => (session.number > max.number ? session : max),
-    sessions[0],
+  const pilot = selectInitialSession(
+    sessions,
+    readStored(STORAGE.session(campaignId)),
   );
-  const pilot = sessions.find((session) => session.number === storedNumber) || highest;
   elements.sessionSelect.innerHTML = sessions
     .map((session) => option(session.number, `${session.number} · ${session.title}`, session.number === pilot.number))
     .join("");
@@ -170,9 +200,8 @@ async function loadSession(campaignId, sessionNumber) {
   );
   state.session = session;
   state.selectedScene = null;
-  state.notesDirty = false;
-  state.lastSavedAt = null;
   elements.notes.value = session.notes;
+  notesSaver.reset(`${session.campaign.id}:${session.number}`);
   updateNotesPreview();
   elements.campaignName.textContent = session.campaign.name;
   elements.sessionName.textContent = `Session ${session.number} · ${session.title}`;
@@ -353,6 +382,14 @@ function relativeTime(timestamp) {
 }
 
 function renderSaveState() {
+  if (state.notesSaving) {
+    elements.saveState.textContent = "Saving...";
+    return;
+  }
+  if (state.notesSaveError) {
+    elements.saveState.textContent = "Save failed - retrying";
+    return;
+  }
   if (state.notesDirty) {
     elements.saveState.textContent = "Unsaved changes";
     return;
@@ -365,30 +402,16 @@ function renderSaveState() {
 }
 
 async function saveNotes({ silent = false } = {}) {
-  if (!state.session || (silent && !state.notesDirty)) return;
-  elements.saveNotes.disabled = true;
-  if (!silent) elements.saveState.textContent = "Saving...";
-  try {
-    const result = await request("/api/notes", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        campaign: state.session.campaign.id,
-        session: state.session.number,
-        notes: elements.notes.value,
-      }),
-    });
-    state.notesDirty = false;
-    state.lastSavedAt = Date.now();
-    renderSaveState();
-    if (result.created) showToast(`Created notes block for Session ${state.session.number}`);
-    else if (!silent) showToast(result.backup ? "Workbook saved · backup created" : "Workbook saved");
-    console.info("Backup:", result.backup);
-  } catch (error) {
-    elements.saveState.textContent = "Save failed";
-    showToast(error.message);
-  } finally {
-    elements.saveNotes.disabled = false;
+  if (!state.session || (silent && !notesSaver.isDirty())) return;
+  const savedBefore = notesSaver.getState().savedRevision;
+  await notesSaver.save();
+  const saveState = notesSaver.getState();
+  if (saveState.lastError) {
+    if (!silent) showToast(saveState.lastError.message);
+    return;
+  }
+  if (!silent && saveState.savedRevision > savedBefore) {
+    showToast("Workbook saved");
   }
 }
 
@@ -555,8 +578,7 @@ document.addEventListener("click", (event) => {
 });
 
 elements.notes.addEventListener("input", () => {
-  state.notesDirty = true;
-  renderSaveState();
+  notesSaver.markChanged();
   updateNotesPreview();
 });
 
