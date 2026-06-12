@@ -160,7 +160,7 @@ test("secret rolls are DM-only and hidden from players", async () => {
   );
   assert.equal(denied.status, 403);
 
-  const { status, data } = await api("POST", "/api/chat", { from: "DM", text: "/sroll d20" });
+  const { status, data } = await api("POST", "/api/chat", { text: "/sroll d20" });
   assert.equal(status, 200);
   assert.equal(data.message.scope, "secret");
 

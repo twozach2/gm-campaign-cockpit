@@ -1034,7 +1034,7 @@ elements.chatInputDm?.addEventListener("keydown", async (event) => {
   if (!text.trim()) return;
   elements.chatInputDm.value = "";
   try {
-    await postJson("/api/chat", { from: "DM", text });
+    await postJson("/api/chat", { text });
   } catch (error) {
     showToast(error.message);
   }

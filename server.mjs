@@ -5,13 +5,15 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { randomInt } from "node:crypto";
 import { AtomicJsonStore } from "./lib/atomic-json-store.mjs";
+import {
+  apiRoute,
+  parseRouteBody,
+  parseRouteQuery,
+} from "./lib/api-policy.mjs";
 import { DmAuth } from "./lib/dm-auth.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import { Vault } from "./lib/vault.mjs";
-import {
-  acknowledgeNoteOperation,
-  parseNoteOperation,
-} from "./lib/note-operation.mjs";
+import { acknowledgeNoteOperation } from "./lib/note-operation.mjs";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
 const vaultRoot = path.resolve(process.env.VAULT_ROOT || path.join(appRoot, ".."));
@@ -228,8 +230,6 @@ function chatVisibleToPlayer(message, playerId) {
   );
 }
 
-const RESERVED_NAME = /^dm$/i;
-
 const MAX_ROLL_TERMS = 10;
 const MAX_DICE = 100;
 const MAX_SIDES = 1000;
@@ -346,52 +346,11 @@ function clearDmCookie(request) {
   return dmCookie(request, "", 0);
 }
 
-function isDmAuthorized(request) {
-  return Boolean(dmAuth.authenticate(dmToken(request)));
-}
-
 function bearerToken(request) {
   const authorization = request.headers.authorization || "";
   const match = authorization.match(/^Bearer\s+(.+)$/i);
   return match?.[1]?.trim() || "";
 }
-
-function requirePlayer(request) {
-  return playerSessions.require(bearerToken(request));
-}
-
-const DM_API = new Set([
-  "/api/dm/state",
-  "/api/campaigns",
-  "/api/sessions",
-  "/api/session",
-  "/api/document",
-  "/api/documents",
-  "/api/file",
-  "/api/validate",
-  "/api/notes",
-  "/api/player-guide",
-  "/api/reveal/card",
-  "/api/reveal/image",
-  "/api/reveal/text",
-  "/api/reveal/clear",
-  "/api/reveal/remove",
-  "/api/whisper",
-  "/api/status",
-  "/api/status/upsert",
-  "/api/status/remove",
-]);
-const DM_WRITE_API = new Set([
-  "/api/notes",
-  "/api/reveal/card",
-  "/api/reveal/image",
-  "/api/reveal/text",
-  "/api/reveal/clear",
-  "/api/reveal/remove",
-  "/api/whisper",
-  "/api/status/upsert",
-  "/api/status/remove",
-]);
 
 function sendJson(response, status, data, headers = {}) {
   response.writeHead(status, {
@@ -402,14 +361,18 @@ function sendJson(response, status, data, headers = {}) {
   response.end(JSON.stringify(data));
 }
 
-async function readJson(request) {
-  let body = "";
+async function readJson(request, maxBodyBytes) {
+  const chunks = [];
+  let bodyBytes = 0;
   for await (const chunk of request) {
-    body += chunk;
-    if (body.length > 150_000) {
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    bodyBytes += buffer.length;
+    if (bodyBytes > maxBodyBytes) {
       throw Object.assign(new Error("Request body is too large"), { status: 413 });
     }
+    chunks.push(buffer);
   }
+  const body = Buffer.concat(chunks).toString("utf8");
   try {
     return JSON.parse(body || "{}");
   } catch {
@@ -477,8 +440,59 @@ function requireDmCsrf(request) {
   }
 }
 
+function authorizeRequest(request, policy) {
+  if (policy.role === "dm") {
+    const token = dmToken(request);
+    const session = dmAuth.authenticate(token);
+    if (!session) reject(401, "DM login required");
+    if (policy.mutates) requireDmCsrf(request);
+    return { role: "dm", token, session };
+  }
+
+  if (policy.role === "player") {
+    const token = bearerToken(request);
+    const player = playerSessions.authenticate(token);
+    if (!player) reject(401, "Player session required");
+    return { role: "player", token, player };
+  }
+
+  if (policy.role === "dm-or-player") {
+    const playerToken = bearerToken(request);
+    const player = playerSessions.authenticate(playerToken);
+    if (player) return { role: "player", token: playerToken, player };
+
+    const dmSessionToken = dmToken(request);
+    const session = dmAuth.authenticate(dmSessionToken);
+    if (!session) reject(401, "Player or DM session required");
+    requireDmCsrf(request);
+    return { role: "dm", token: dmSessionToken, session };
+  }
+
+  return { role: policy.role };
+}
+
 async function api(request, response, url) {
-  enforceWriteRequest(request);
+  const policy = apiRoute(url.pathname);
+  if (!policy) {
+    return sendJson(response, 404, { error: "API route not found" });
+  }
+  if (request.method !== policy.method) {
+    return sendJson(
+      response,
+      405,
+      { error: "Method not allowed" },
+      { Allow: policy.method },
+    );
+  }
+  if (policy.mutates) enforceWriteRequest(request);
+  const authorization = authorizeRequest(request, policy);
+  const query = parseRouteQuery(policy, url.searchParams);
+  const body = policy.parseBody
+    ? parseRouteBody(
+        policy,
+        await readJson(request, policy.maxBodyBytes),
+      )
+    : null;
 
   if (request.method === "GET" && url.pathname === "/api/health") {
     return sendJson(response, 200, { ok: true, vaultRoot });
@@ -505,7 +519,6 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/dm/login") {
-    const body = await readJson(request);
     const authenticated = dmAuth.login(body.pin);
     if (!authenticated) {
       return sendJson(response, 401, { error: "Invalid table PIN" });
@@ -522,12 +535,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/dm/logout") {
-    const token = dmToken(request);
-    if (!dmAuth.authenticate(token)) {
-      return sendJson(response, 401, { error: "DM login required" });
-    }
-    requireDmCsrf(request);
-    dmAuth.revoke(token);
+    dmAuth.revoke(authorization.token);
     return sendJson(
       response,
       200,
@@ -540,27 +548,11 @@ async function api(request, response, url) {
     request.method === "POST" &&
     url.pathname === "/api/dm/stream-ticket"
   ) {
-    const token = dmToken(request);
-    if (!dmAuth.authenticate(token)) {
-      return sendJson(response, 401, { error: "DM login required" });
-    }
-    requireDmCsrf(request);
-    const ticket = dmAuth.issueStreamTicket(token);
+    const ticket = dmAuth.issueStreamTicket(authorization.token);
     return sendJson(response, 200, ticket);
   }
 
-  if (DM_API.has(url.pathname) && !isDmAuthorized(request)) {
-    return sendJson(response, 401, { error: "DM login required" });
-  }
-  if (
-    STATE_CHANGING_METHODS.has(request.method) &&
-    DM_WRITE_API.has(url.pathname)
-  ) {
-    requireDmCsrf(request);
-  }
-
   if (request.method === "POST" && url.pathname === "/api/player/join") {
-    const body = await readJson(request);
     return sendJson(
       response,
       200,
@@ -569,9 +561,8 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/player/rename") {
-    const body = await readJson(request);
     const player = playerSessions.rename(
-      bearerToken(request),
+      authorization.token,
       body.displayName,
     );
     broadcast("presence", { players: connectedPlayers() });
@@ -579,7 +570,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/player/leave") {
-    const player = playerSessions.revoke(bearerToken(request));
+    const player = playerSessions.revoke(authorization.token);
     for (const client of clients) {
       if (client.role === "player" && client.playerId === player.playerId) {
         client.response.end();
@@ -597,15 +588,15 @@ async function api(request, response, url) {
     return sendJson(
       response,
       200,
-      playerSessions.issueStreamTicket(bearerToken(request)),
+      playerSessions.issueStreamTicket(authorization.token),
     );
   }
 
   if (request.method === "GET" && url.pathname === "/api/stream") {
     let client;
-    if (url.searchParams.get("role") === "dm") {
+    if (query.role === "dm") {
       if (
-        !dmAuth.consumeStreamTicket(url.searchParams.get("ticket"))
+        !dmAuth.consumeStreamTicket(query.ticket)
       ) {
         return sendJson(response, 401, {
           error: "Invalid or expired DM stream ticket",
@@ -614,7 +605,7 @@ async function api(request, response, url) {
       client = { response, role: "dm" };
     } else {
       const player = playerSessions.consumeStreamTicket(
-        url.searchParams.get("ticket"),
+        query.ticket,
       );
       if (!player) {
         return sendJson(response, 401, {
@@ -649,7 +640,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/state") {
-    const player = requirePlayer(request);
+    const player = authorization.player;
     const messages = chat.filter((message) =>
       chatVisibleToPlayer(message, player.playerId),
     );
@@ -670,8 +661,9 @@ async function api(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/image") {
-    const id = Number(url.searchParams.get("id"));
-    const item = presentation.items.find((i) => i.id === id && i.type === "image");
+    const item = presentation.items.find(
+      (entry) => entry.id === query.id && entry.type === "image",
+    );
     if (!item) return sendJson(response, 404, { error: "Image is not currently revealed" });
     const filePath = await vault.resolveFilePath(item.campaign, item.file);
     const content = await readFile(filePath);
@@ -683,19 +675,9 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/chat") {
-    const authenticatedPlayer = playerSessions.authenticate(bearerToken(request));
-    if (!authenticatedPlayer && isDmAuthorized(request)) requireDmCsrf(request);
-    const body = await readJson(request);
-    const text = String(body.text || "").slice(0, 2000);
-    if (!text.trim()) return sendJson(response, 400, { error: "Empty message" });
-    const player = authenticatedPlayer;
-    const isDm =
-      !player &&
-      RESERVED_NAME.test(String(body.from || "").trim()) &&
-      isDmAuthorized(request);
-    if (!player && !isDm) {
-      return sendJson(response, 401, { error: "Player session required" });
-    }
+    const text = body.text;
+    const player = authorization.player;
+    const isDm = authorization.role === "dm";
     const from = isDm ? "DM" : player.displayName;
     const identity = player ? { fromPlayerId: player.playerId } : {};
     const whisper = Boolean(body.whisper) && !isDm;
@@ -728,7 +710,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/player-guide") {
-    const guideData = await vault.playerGuide(url.searchParams.get("campaign"));
+    const guideData = await vault.playerGuide(query.campaign);
     if (!guideData) return sendJson(response, 404, { error: "No Player's Guide.md in this campaign" });
     return sendJson(response, 200, {
       title: guideData.title,
@@ -738,7 +720,6 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/reveal/card") {
-    const body = await readJson(request);
     const guideData = await vault.playerGuide(body.campaign);
     const card = guideData?.cards.find((c) => c.id === body.cardId);
     if (!card) return sendJson(response, 404, { error: "Card not found" });
@@ -754,7 +735,6 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/reveal/image") {
-    const body = await readJson(request);
     await vault.resolveFilePath(body.campaign, body.file);
     const basename = String(body.file).split("/").pop();
     const item = makeItem("image", {
@@ -768,9 +748,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/reveal/text") {
-    const body = await readJson(request);
-    const text = String(body.text || "").slice(0, 4000);
-    if (!text.trim()) return sendJson(response, 400, { error: "Empty note" });
+    const text = body.text;
     const derived = text.replace(/\s+/g, " ").trim().slice(0, 40) || "Note";
     const title = String(body.title || derived).slice(0, 80);
     const item = makeItem("text", { title, text });
@@ -780,8 +758,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/reveal/remove") {
-    const body = await readJson(request);
-    const id = Number(body.id);
+    const id = body.id;
     const before = presentation.items.length;
     presentation.items = presentation.items.filter((i) => i.id !== id);
     if (presentation.items.length === before) {
@@ -798,14 +775,10 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/whisper") {
-    const body = await readJson(request);
     const player = playerSessions.get(body.toPlayerId);
-    const text = String(body.text || "").slice(0, 2000);
+    const text = body.text;
     if (!player) {
       return sendJson(response, 404, { error: "Player not found" });
-    }
-    if (!text.trim()) {
-      return sendJson(response, 400, { error: "Whisper text required" });
     }
     const message = pushChat({
       scope: "whisper",
@@ -822,44 +795,39 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/status/upsert") {
-    const body = await readJson(request);
-    const id = body.id === undefined ? null : Number(body.id);
+    const id = body.id === undefined ? null : body.id;
     let tracker = id === null ? null : status.trackers.find((t) => t.id === id);
     if (id !== null && !tracker) {
       return sendJson(response, 404, { error: "Tracker not found" });
     }
     if (!tracker) {
-      const name = String(body.name || "").trim().slice(0, 80);
-      if (!name) return sendJson(response, 400, { error: "Tracker name required" });
-      const type = body.type === "meter" ? "meter" : body.type === "initiative" ? "initiative" : "clock";
+      const name = body.name;
+      const type = body.type || "clock";
       tracker =
         type === "initiative"
           ? { id: ++trackerSeq, type, name, entries: [], turn: 0, hidden: false }
           : { id: ++trackerSeq, type, name, max: type === "meter" ? 10 : 4, value: 0, hidden: false };
       status.trackers.push(tracker);
     } else if (body.name !== undefined) {
-      tracker.name = String(body.name).trim().slice(0, 80) || tracker.name;
+      tracker.name = body.name || tracker.name;
     }
-    if (body.hidden !== undefined) tracker.hidden = Boolean(body.hidden);
+    if (body.hidden !== undefined) tracker.hidden = body.hidden;
     if (tracker.type === "initiative") {
       if (body.entries !== undefined) {
-        tracker.entries = (Array.isArray(body.entries) ? body.entries : [])
-          .map((entry) => String(entry).trim().slice(0, 60))
-          .filter(Boolean)
-          .slice(0, 40);
+        tracker.entries = body.entries;
       }
       if (body.turn !== undefined) {
-        const turn = Math.round(Number(body.turn)) || 0;
+        const turn = body.turn;
         const count = tracker.entries.length;
         tracker.turn = count ? ((turn % count) + count) % count : 0;
       }
       tracker.turn = Math.max(0, Math.min(tracker.turn, Math.max(0, tracker.entries.length - 1)));
     } else {
       if (body.max !== undefined) {
-        tracker.max = Math.max(1, Math.min(1000, Math.round(Number(body.max)) || 1));
+        tracker.max = body.max;
       }
       if (body.value !== undefined) {
-        tracker.value = Math.round(Number(body.value)) || 0;
+        tracker.value = body.value;
       }
       tracker.value = Math.max(0, Math.min(tracker.max, tracker.value));
     }
@@ -868,8 +836,7 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/status/remove") {
-    const body = await readJson(request);
-    const id = Number(body.id);
+    const id = body.id;
     const before = status.trackers.length;
     status.trackers = status.trackers.filter((t) => t.id !== id);
     if (status.trackers.length === before) {
@@ -884,7 +851,7 @@ async function api(request, response, url) {
   }
   if (request.method === "GET" && url.pathname === "/api/sessions") {
     return sendJson(response, 200, {
-      sessions: await vault.sessions(url.searchParams.get("campaign")),
+      sessions: await vault.sessions(query.campaign),
     });
   }
   if (request.method === "GET" && url.pathname === "/api/session") {
@@ -892,8 +859,8 @@ async function api(request, response, url) {
       response,
       200,
       await vault.session(
-        url.searchParams.get("campaign"),
-        Number(url.searchParams.get("number")),
+        query.campaign,
+        query.number,
       ),
     );
   }
@@ -902,21 +869,21 @@ async function api(request, response, url) {
       response,
       200,
       await vault.resolveDocument(
-        url.searchParams.get("campaign"),
-        url.searchParams.get("file"),
-        url.searchParams.get("heading") || "",
+        query.campaign,
+        query.file,
+        query.heading,
       ),
     );
   }
   if (request.method === "GET" && url.pathname === "/api/documents") {
     return sendJson(response, 200, {
-      documents: await vault.listDocuments(url.searchParams.get("campaign")),
+      documents: await vault.listDocuments(query.campaign),
     });
   }
   if (request.method === "GET" && url.pathname === "/api/file") {
     const filePath = await vault.resolveFilePath(
-      url.searchParams.get("campaign"),
-      url.searchParams.get("file"),
+      query.campaign,
+      query.file,
     );
     const content = await readFile(filePath);
     response.writeHead(200, {
@@ -926,14 +893,14 @@ async function api(request, response, url) {
     return response.end(content);
   }
   if (request.method === "GET" && url.pathname === "/api/validate") {
-    const campaign = url.searchParams.get("campaign");
+    const campaign = query.campaign;
     if (campaign) {
       return sendJson(response, 200, { reports: [await vault.validateCampaign(campaign)], skipped: [] });
     }
     return sendJson(response, 200, await vault.validateAll());
   }
   if (request.method === "POST" && url.pathname === "/api/notes") {
-    const operation = parseNoteOperation(await readJson(request));
+    const operation = body;
     const result = await vault.saveNotes(
       operation.campaign,
       operation.session,

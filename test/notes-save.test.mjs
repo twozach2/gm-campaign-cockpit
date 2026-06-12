@@ -95,6 +95,8 @@ test("typing during an in-flight save queues and persists the newest revision", 
       [2, "First snapshot\nTyped after request started"],
     ],
   );
+  assert.equal("contextKey" in calls[0], false);
+  assert.equal("contextKey" in calls[1], false);
   assert.equal(coordinator.getState().dirty, false);
   assert.equal(coordinator.getState().savedRevision, 2);
   assert.ok(states.some((state) => state.saving && state.dirty));

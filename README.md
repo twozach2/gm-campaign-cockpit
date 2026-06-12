@@ -204,6 +204,9 @@ Player-facing image reveals use the separate "push image" control; embedding
   session-bound CSRF token that is never stored in the cookie.
 - `ALLOWED_ORIGINS` may contain a comma-separated list of additional trusted
   browser origins when a custom LAN hostname is required.
+- API methods, roles, query parameters, body fields, and body-size limits are
+  declared in one route policy; invalid or unknown input is rejected before a
+  handler changes state.
 - DM event streams use a short-lived, single-use ticket rather than exposing
   the session cookie or PIN in the URL.
 

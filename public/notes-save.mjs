@@ -78,13 +78,14 @@ export function createNotesSaveCoordinator({
         const capturedContext = contextKey;
         const capturedRevision = revision;
         const operationId = createOperationId();
+        const { contextKey: _contextKey, ...requestSnapshot } = snapshot;
         savingRevision = capturedRevision;
         lastError = null;
         emit();
 
         try {
           const result = await saveSnapshot({
-            ...snapshot,
+            ...requestSnapshot,
             operationId,
             revision: capturedRevision,
           });
