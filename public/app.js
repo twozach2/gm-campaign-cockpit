@@ -21,6 +21,8 @@ const state = {
   revealedItems: [],
   trackers: [],
   initEditing: new Set(),
+  dmStreamConnecting: false,
+  dmStreamReconnect: null,
 };
 
 const elements = {
@@ -70,15 +72,26 @@ const elements = {
   previewModal: document.querySelector("#preview-modal"),
   previewClose: document.querySelector("#preview-close"),
   previewBody: document.querySelector("#preview-body"),
+  dmLogin: document.querySelector("#dm-login"),
+  dmLoginForm: document.querySelector("#dm-login-form"),
+  dmLoginPin: document.querySelector("#dm-login-pin"),
+  dmLoginError: document.querySelector("#dm-login-error"),
+  dmLogout: document.querySelector("#dm-logout"),
 };
 
 async function request(url, options = {}) {
-  const pin = sessionStorage.getItem("gm-cockpit:pin");
   const headers = { ...(options.headers || {}) };
-  if (pin) headers["x-table-pin"] = pin;
-  const response = await fetch(url, { ...options, headers });
+  const response = await fetch(url, {
+    ...options,
+    headers,
+    credentials: "same-origin",
+  });
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -729,20 +742,44 @@ function updatePlayers(players) {
   }
 }
 
-function connectDmStream() {
+function scheduleDmReconnect() {
+  clearTimeout(state.dmStreamReconnect);
+  state.dmStreamReconnect = setTimeout(() => {
+    connectDmStream();
+  }, 1000);
+}
+
+async function connectDmStream() {
+  if (state.dmStreamConnecting) return;
+  state.dmStreamConnecting = true;
   if (state.dmStream) state.dmStream.close();
-  const pin = sessionStorage.getItem("gm-cockpit:pin") || "";
-  const url = `/api/stream?role=dm${pin ? `&pin=${encodeURIComponent(pin)}` : ""}`;
-  const es = new EventSource(url);
-  state.dmStream = es;
-  es.addEventListener("chat", (event) => appendDmMessage(JSON.parse(event.data)));
-  es.addEventListener("whisper", (event) => appendDmMessage(JSON.parse(event.data)));
-  es.addEventListener("presence", (event) => updatePlayers(JSON.parse(event.data).players));
-  es.addEventListener("reveal-set", (event) => renderRevealed(JSON.parse(event.data).items || []));
-  es.addEventListener("status-set", (event) => renderTrackers(JSON.parse(event.data).trackers || []));
-  es.onerror = () => {
-    /* browser auto-reconnects */
-  };
+  try {
+    const { ticket } = await postJson("/api/dm/stream-ticket", {});
+    const es = new EventSource(
+      `/api/stream?role=dm&ticket=${encodeURIComponent(ticket)}`,
+    );
+    state.dmStream = es;
+    es.addEventListener("chat", (event) => appendDmMessage(JSON.parse(event.data)));
+    es.addEventListener("whisper", (event) => appendDmMessage(JSON.parse(event.data)));
+    es.addEventListener("presence", (event) => updatePlayers(JSON.parse(event.data).players));
+    es.addEventListener("reveal-set", (event) => renderRevealed(JSON.parse(event.data).items || []));
+    es.addEventListener("status-set", (event) => renderTrackers(JSON.parse(event.data).trackers || []));
+    es.onerror = () => {
+      if (state.dmStream !== es) return;
+      es.close();
+      state.dmStream = null;
+      scheduleDmReconnect();
+    };
+  } catch (error) {
+    if (error.status === 401) {
+      showDmLogin();
+    } else {
+      showToast(error.message);
+      scheduleDmReconnect();
+    }
+  } finally {
+    state.dmStreamConnecting = false;
+  }
 }
 
 function trackerMeterColor(ratio) {
@@ -1009,15 +1046,57 @@ elements.whisperSend?.addEventListener("click", async () => {
   }
 });
 
-async function ensurePin() {
+let dmLoginResolve = null;
+
+function showDmLogin() {
+  elements.dmLogin?.classList.remove("hidden");
+  elements.dmLoginPin?.focus();
+}
+
+function hideDmLogin() {
+  elements.dmLogin?.classList.add("hidden");
+  if (elements.dmLoginError) elements.dmLoginError.textContent = "";
+  if (elements.dmLoginPin) elements.dmLoginPin.value = "";
+}
+
+async function ensureDmSession() {
   try {
-    await request("/api/campaigns");
+    await request("/api/dm/session");
+    hideDmLogin();
   } catch (error) {
-    if (!/PIN/i.test(error.message) && !/401/.test(error.message)) throw error;
-    const pin = window.prompt("Enter table PIN");
-    if (pin) sessionStorage.setItem("gm-cockpit:pin", pin);
+    if (error.status !== 401) throw error;
+    showDmLogin();
+    await new Promise((resolve) => {
+      dmLoginResolve = resolve;
+    });
   }
 }
+
+elements.dmLoginForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const pin = elements.dmLoginPin?.value || "";
+  if (!pin) return;
+  if (elements.dmLoginError) elements.dmLoginError.textContent = "";
+  try {
+    await postJson("/api/dm/login", { pin });
+    hideDmLogin();
+    const resolveLogin = dmLoginResolve;
+    dmLoginResolve = null;
+    if (resolveLogin) resolveLogin();
+    else window.location.reload();
+  } catch (error) {
+    if (elements.dmLoginError) elements.dmLoginError.textContent = error.message;
+    elements.dmLoginPin?.select();
+  }
+});
+
+elements.dmLogout?.addEventListener("click", async () => {
+  try {
+    await postJson("/api/dm/logout", {});
+  } finally {
+    window.location.reload();
+  }
+});
 
 const LAYOUT_STORAGE = "gm-cockpit:layout";
 const LAYOUT_LIMITS = {
@@ -1151,11 +1230,11 @@ function initResizers() {
 
 async function bootstrap() {
   initResizers();
-  await ensurePin();
+  await ensureDmSession();
   await loadCampaigns();
   await syncDmChat();
   await syncTrackers();
-  connectDmStream();
+  await connectDmStream();
 }
 
 bootstrap().catch(setError);

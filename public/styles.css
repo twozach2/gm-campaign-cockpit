@@ -119,14 +119,82 @@ select {
   font-weight: 600;
 }
 
+.topbar-actions {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-right: 22px;
+}
+
 .save-state {
   justify-self: end;
-  margin-right: 22px;
   padding: 7px 10px;
   border: 1px solid var(--line);
   border-radius: 999px;
   color: var(--muted);
   font-size: 11px;
+}
+
+.auth-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(10, 7, 24, 0.94);
+  backdrop-filter: blur(10px);
+}
+
+.auth-card {
+  width: min(430px, 100%);
+  padding: 28px;
+  border: 1px solid var(--line-bright);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.auth-card h1 {
+  margin: 5px 0 8px;
+  font-family: Georgia, serif;
+  font-size: 25px;
+}
+
+.auth-card > p {
+  margin: 0 0 20px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.auth-card input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.auth-card button {
+  width: 100%;
+  margin-top: 10px;
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--amber);
+  color: #071b17;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.auth-error {
+  min-height: 1.25em;
+  margin: 10px 0 0 !important;
+  color: var(--red) !important;
+  font-size: 13px;
 }
 
 .sidebar {
@@ -1033,6 +1101,10 @@ body.resizing-row {
   }
 
   .save-state {
+    justify-self: start;
+  }
+
+  .topbar-actions {
     justify-self: start;
     margin: 0 20px;
   }

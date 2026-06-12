@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { SessionRegistry } from "../lib/session-registry.mjs";
-import { api, startTestServer } from "../test-support/server.mjs";
+import {
+  api,
+  localDmCookie,
+  startTestServer,
+} from "../test-support/server.mjs";
 
 test("duplicate display names remain separate identities", () => {
   let sequence = 0;
@@ -55,6 +59,7 @@ test("same-name browser cannot read or send another player's whispers", async (t
   const { base } = await startTestServer(t, {
     prefix: "gm-cockpit-identity-",
   });
+  const dmCookie = await localDmCookie(base);
   const first = await api(base, "POST", "/api/player/join", {
     displayName: "Tav",
   });
@@ -103,6 +108,8 @@ test("same-name browser cannot read or send another player's whispers", async (t
   const dmWhisper = await api(base, "POST", "/api/whisper", {
     toPlayerId: first.data.player.playerId,
     text: "I saw that.",
+  }, {
+    headers: { Cookie: dmCookie },
   });
   assert.equal(dmWhisper.status, 200);
   const firstAfter = await api(

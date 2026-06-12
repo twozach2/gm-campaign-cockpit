@@ -22,7 +22,10 @@
           <span id="campaign-name">Loading vault...</span>
           <strong id="session-name"></strong>
         </div>
-        <div class="save-state" id="save-state" aria-live="polite">Local vault</div>
+        <div class="topbar-actions">
+          <div class="save-state" id="save-state" aria-live="polite">Local vault</div>
+          <button id="dm-logout" class="ghost-button-sm" type="button">Log out</button>
+        </div>
       </header>
 
       <aside class="sidebar">
@@ -171,6 +174,20 @@
         </div>
         <div id="preview-body" class="preview-stage"></div>
       </div>
+    </div>
+
+    <div id="dm-login" class="auth-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="dm-login-title">
+      <form id="dm-login-form" class="auth-card">
+        <span class="eyebrow">Dungeon Master Access</span>
+        <h1 id="dm-login-title">Enter the table PIN</h1>
+        <p>The PIN is exchanged for a private browser session and is never placed in the URL.</p>
+        <label class="field">
+          <span>Table PIN or passphrase</span>
+          <input id="dm-login-pin" type="password" autocomplete="current-password" required>
+        </label>
+        <p id="dm-login-error" class="auth-error" aria-live="polite"></p>
+        <button type="submit">Open the cockpit</button>
+      </form>
     </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite"></div>

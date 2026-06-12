@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const appRoot = path.dirname(
+export const appRoot = path.dirname(
   path.dirname(fileURLToPath(import.meta.url)),
 );
 
@@ -120,4 +120,12 @@ export async function api(
     }
   }
   return { status: response.status, data, headers: response.headers };
+}
+
+export async function localDmCookie(base) {
+  const session = await api(base, "GET", "/api/dm/session");
+  if (session.status !== 200) {
+    throw new Error(`Could not create local DM session (${session.status})`);
+  }
+  return session.headers.get("set-cookie")?.split(";")[0] || "";
 }

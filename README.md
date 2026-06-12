@@ -139,7 +139,8 @@ players never browse the campaign vault themselves.
 **Start it:**
 
 ```bash
-HOST=0.0.0.0 VAULT_ROOT="/path/to/your/campaigns" npm start
+HOST=0.0.0.0 ALLOW_REMOTE_DM=true TABLE_PIN=123456 \
+  VAULT_ROOT="/path/to/your/campaigns" npm start
 ```
 
 The default `HOST=127.0.0.1` only accepts loopback connections. Setting
@@ -149,11 +150,19 @@ and the table PIN on startup:
 ```
 GM Campaign Cockpit (DM): http://0.0.0.0:4173
 Player screen (LAN):      http://192.168.1.42:4173/player.html
-Table PIN (DM access off-localhost): 7321
+Table PIN (remote DM login): 732184
 ```
 
-Set a stable PIN with `TABLE_PIN=1234` if you don't want it to rotate on every
-restart.
+Remote binding now requires an explicit opt-in and a six-character-or-longer
+PIN:
+
+```bash
+HOST=0.0.0.0 ALLOW_REMOTE_DM=true TABLE_PIN=123456 npm start
+```
+
+The DM enters that PIN in the cockpit login screen. The server exchanges it for
+an opaque `HttpOnly` browser session; neither the PIN nor the session token is
+placed in a URL.
 
 **What players see.** Each device opens `http://<lan-ip>:<port>/player.html`,
 types a name once (stored in `localStorage`), and lands on a holding screen
@@ -184,19 +193,18 @@ Player-facing image reveals use the separate "push image" control; embedding
 
 **Security model.**
 
-- LAN-open (no PIN): `/player.html`, `/api/player/state`,
-  `/api/player/guide` (only the currently revealed card), `/api/player/image`
-  (only the currently revealed image), `/api/stream?role=player`, `/api/chat`,
-  `/api/health`.
-- DM-gated (loopback **or** correct `x-table-pin` header / `?pin=` query):
-  the DM page `/` and `/app.js`, every existing API (`/api/campaigns`,
-  `/api/sessions`, `/api/session`, `/api/document(s)`, `/api/file`,
-  `/api/validate`, `/api/notes`), the full card list (`/api/player-guide`),
-  the DM SSE stream, and every reveal/whisper route.
+- Static HTML, JavaScript, and CSS may be loaded without authentication, but
+  they contain no campaign data.
+- Player APIs require a server-issued bearer session. Display names are labels,
+  not identities, and one-time tickets authenticate player event streams.
+- DM APIs require an opaque `HttpOnly; SameSite=Strict` session cookie.
+- Localhost receives a DM session automatically. Remote LAN browsers log in
+  through `POST /api/dm/login`; the PIN is never accepted in a query string.
+- DM event streams use a short-lived, single-use ticket rather than exposing
+  the session cookie or PIN in the URL.
 
-The DM browser prompts for the PIN once on first off-localhost load and caches
-it in `sessionStorage`. Presentation state and chat live in memory and reset on
-every server restart (chat is capped at 200 messages).
+Presentation state, player sessions, DM sessions, and chat live in memory and
+reset on every server restart (chat is capped at 200 messages).
 
 ## Templates & starting a new campaign
 

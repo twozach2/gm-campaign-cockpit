@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "node server.mjs",
-    "session": "HOST=0.0.0.0 TABLE_PIN=1234 VAULT_ROOT='/Users/zachtolen/Documents/Obsidian Vault/DnD' node server.mjs",
+    "session": "HOST=0.0.0.0 ALLOW_REMOTE_DM=true VAULT_ROOT='/Users/zachtolen/Documents/Obsidian Vault/DnD' node server.mjs",
     "check": "node validate.mjs",
     "test": "node --test",
     "new-campaign": "node scaffold.mjs"

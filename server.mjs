@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { randomInt } from "node:crypto";
 import { AtomicJsonStore } from "./lib/atomic-json-store.mjs";
+import { DmAuth } from "./lib/dm-auth.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import { Vault } from "./lib/vault.mjs";
 import {
@@ -34,8 +35,24 @@ const mimeTypes = {
   ".pdf": "application/pdf",
 };
 
-const TABLE_PIN = process.env.TABLE_PIN || String(randomInt(1000, 1_000_000)).padStart(4, "0");
+const TABLE_PIN =
+  process.env.TABLE_PIN || String(randomInt(100_000, 1_000_000));
+const ALLOW_LOCAL_DM = process.env.ALLOW_LOCAL_DM !== "false";
+const ALLOW_REMOTE_DM = process.env.ALLOW_REMOTE_DM === "true";
+const REMOTE_BINDING = !["127.0.0.1", "::1", "localhost"].includes(host);
+const DM_COOKIE = "gm-cockpit-dm";
 const CHAT_LIMIT = 200;
+
+if (REMOTE_BINDING && !ALLOW_REMOTE_DM) {
+  throw new Error(
+    "Remote binding requires ALLOW_REMOTE_DM=true. Keep HOST=127.0.0.1 for local-only use.",
+  );
+}
+if (REMOTE_BINDING && TABLE_PIN.length < 6) {
+  throw new Error(
+    "TABLE_PIN must be at least 6 characters when remote DM access is enabled.",
+  );
+}
 
 const presentation = {
   items: [],
@@ -44,6 +61,7 @@ const presentation = {
 const chat = [];
 const clients = new Set();
 const playerSessions = new SessionRegistry();
+const dmAuth = new DmAuth({ pin: TABLE_PIN });
 let messageSeq = 0;
 let itemSeq = 0;
 
@@ -260,10 +278,38 @@ function isLoopback(request) {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
-function isDmAuthorized(request, url) {
-  if (isLoopback(request)) return true;
-  const pin = request.headers["x-table-pin"] || url.searchParams.get("pin");
-  return Boolean(pin) && pin === TABLE_PIN;
+function cookies(request) {
+  const result = {};
+  for (const part of String(request.headers.cookie || "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator === -1) continue;
+    const key = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (!key) continue;
+    try {
+      result[key] = decodeURIComponent(value);
+    } catch {
+      // Ignore malformed cookie values and treat the request as unauthenticated.
+    }
+  }
+  return result;
+}
+
+function dmToken(request) {
+  return cookies(request)[DM_COOKIE] || "";
+}
+
+function dmCookie(request, token, maxAgeSeconds = 24 * 60 * 60) {
+  const secure = request.socket.encrypted ? "; Secure" : "";
+  return `${DM_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+function clearDmCookie(request) {
+  return dmCookie(request, "", 0);
+}
+
+function isDmAuthorized(request) {
+  return Boolean(dmAuth.authenticate(dmToken(request)));
 }
 
 function bearerToken(request) {
@@ -298,10 +344,11 @@ const DM_API = new Set([
   "/api/status/remove",
 ]);
 
-function sendJson(response, status, data) {
+function sendJson(response, status, data, headers = {}) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
+    ...headers,
   });
   response.end(JSON.stringify(data));
 }
@@ -322,12 +369,68 @@ async function readJson(request) {
 }
 
 async function api(request, response, url) {
-  if (DM_API.has(url.pathname) && !isDmAuthorized(request, url)) {
-    return sendJson(response, 401, { error: "PIN required" });
-  }
-
   if (request.method === "GET" && url.pathname === "/api/health") {
     return sendJson(response, 200, { ok: true, vaultRoot });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/dm/session") {
+    const existing = dmAuth.authenticate(dmToken(request));
+    if (existing) {
+      return sendJson(response, 200, { session: existing });
+    }
+    if (!ALLOW_LOCAL_DM || !isLoopback(request)) {
+      return sendJson(response, 401, { error: "DM login required" });
+    }
+    const created = dmAuth.createSession();
+    return sendJson(
+      response,
+      200,
+      { session: created.session },
+      { "Set-Cookie": dmCookie(request, created.token) },
+    );
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/dm/login") {
+    const body = await readJson(request);
+    const authenticated = dmAuth.login(body.pin);
+    if (!authenticated) {
+      return sendJson(response, 401, { error: "Invalid table PIN" });
+    }
+    return sendJson(
+      response,
+      200,
+      { session: authenticated.session },
+      { "Set-Cookie": dmCookie(request, authenticated.token) },
+    );
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/dm/logout") {
+    const token = dmToken(request);
+    if (!dmAuth.authenticate(token)) {
+      return sendJson(response, 401, { error: "DM login required" });
+    }
+    dmAuth.revoke(token);
+    return sendJson(
+      response,
+      200,
+      { ok: true },
+      { "Set-Cookie": clearDmCookie(request) },
+    );
+  }
+
+  if (
+    request.method === "POST" &&
+    url.pathname === "/api/dm/stream-ticket"
+  ) {
+    const ticket = dmAuth.issueStreamTicket(dmToken(request));
+    if (!ticket) {
+      return sendJson(response, 401, { error: "DM login required" });
+    }
+    return sendJson(response, 200, ticket);
+  }
+
+  if (DM_API.has(url.pathname) && !isDmAuthorized(request)) {
+    return sendJson(response, 401, { error: "DM login required" });
   }
 
   if (request.method === "POST" && url.pathname === "/api/player/join") {
@@ -375,8 +478,12 @@ async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/stream") {
     let client;
     if (url.searchParams.get("role") === "dm") {
-      if (!isDmAuthorized(request, url)) {
-        return sendJson(response, 401, { error: "PIN required" });
+      if (
+        !dmAuth.consumeStreamTicket(url.searchParams.get("ticket"))
+      ) {
+        return sendJson(response, 401, {
+          error: "Invalid or expired DM stream ticket",
+        });
       }
       client = { response, role: "dm" };
     } else {
@@ -457,7 +564,7 @@ async function api(request, response, url) {
     const isDm =
       !player &&
       RESERVED_NAME.test(String(body.from || "").trim()) &&
-      isDmAuthorized(request, url);
+      isDmAuthorized(request);
     if (!player && !isDm) {
       return sendJson(response, 401, { error: "Player session required" });
     }
@@ -716,9 +823,6 @@ async function api(request, response, url) {
 async function staticFile(request, response, url) {
   const pathname = decodeURIComponent(url.pathname);
   const requested = pathname === "/" ? "index.html" : pathname.slice(1);
-  if ((requested === "index.html" || requested === "app.js") && !isDmAuthorized(request, url)) {
-    return sendJson(response, 401, { error: "PIN required" });
-  }
   const candidate = path.resolve(publicRoot, requested);
   const relative = path.relative(publicRoot, candidate);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
@@ -826,8 +930,13 @@ await loadTrackers();
 
 server.listen(port, host, () => {
   const lan = lanAddress();
+  if (REMOTE_BINDING) {
+    console.warn(
+      "WARNING: Remote DM access is enabled. Keep this server on a trusted LAN until cloud relay hardening is complete.",
+    );
+  }
   console.log(`GM Campaign Cockpit (DM): http://${host}:${port}`);
   console.log(`Player screen (LAN):      http://${lan}:${port}/player.html`);
   console.log(`Vault: ${vaultRoot}`);
-  console.log(`Table PIN (DM access off-localhost): ${TABLE_PIN}`);
+  console.log(`Table PIN (remote DM login): ${TABLE_PIN}`);
 });
