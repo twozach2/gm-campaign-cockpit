@@ -168,7 +168,12 @@ test("remote-style DM login uses an opaque cookie and protects APIs", async (t) 
     "POST",
     "/api/dm/stream-ticket",
     {},
-    { headers: { Cookie: cookie } },
+    {
+      headers: {
+        Cookie: cookie,
+        "X-GM-Cockpit-CSRF": login.data.csrfToken,
+      },
+    },
   );
   assert.equal(ticket.status, 200);
   const stream = await fetch(
@@ -186,7 +191,12 @@ test("remote-style DM login uses an opaque cookie and protects APIs", async (t) 
     "POST",
     "/api/dm/logout",
     {},
-    { headers: { Cookie: cookie } },
+    {
+      headers: {
+        Cookie: cookie,
+        "X-GM-Cockpit-CSRF": login.data.csrfToken,
+      },
+    },
   );
   assert.equal(logout.status, 200);
   assert.match(logout.headers.get("set-cookie"), /Max-Age=0/i);

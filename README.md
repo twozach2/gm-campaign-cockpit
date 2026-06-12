@@ -200,6 +200,10 @@ Player-facing image reveals use the separate "push image" control; embedding
 - DM APIs require an opaque `HttpOnly; SameSite=Strict` session cookie.
 - Localhost receives a DM session automatically. Remote LAN browsers log in
   through `POST /api/dm/login`; the PIN is never accepted in a query string.
+- State-changing requests require same-origin JSON. DM writes also carry a
+  session-bound CSRF token that is never stored in the cookie.
+- `ALLOWED_ORIGINS` may contain a comma-separated list of additional trusted
+  browser origins when a custom LAN hostname is required.
 - DM event streams use a short-lived, single-use ticket rather than exposing
   the session cookie or PIN in the URL.
 

@@ -42,6 +42,44 @@ const ALLOW_REMOTE_DM = process.env.ALLOW_REMOTE_DM === "true";
 const REMOTE_BINDING = !["127.0.0.1", "::1", "localhost"].includes(host);
 const DM_COOKIE = "gm-cockpit-dm";
 const CHAT_LIMIT = 200;
+const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const SECURITY_HEADERS = {
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
+};
+const EXPLICIT_ALLOWED_ORIGINS = new Set(
+  String(process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .map((origin) => {
+      try {
+        return new URL(origin).origin;
+      } catch {
+        throw new Error(`Invalid ALLOWED_ORIGINS entry: ${origin}`);
+      }
+    }),
+);
+const LOCAL_ORIGIN_HOSTS = new Set([
+  "127.0.0.1",
+  "::1",
+  "localhost",
+  os.hostname().toLowerCase(),
+]);
+if (!["0.0.0.0", "::"].includes(host)) {
+  LOCAL_ORIGIN_HOSTS.add(host.toLowerCase());
+}
+for (const interfaces of Object.values(os.networkInterfaces())) {
+  for (const address of interfaces || []) {
+    if (address.family === "IPv4" || address.family === "IPv6") {
+      LOCAL_ORIGIN_HOSTS.add(address.address.toLowerCase());
+    }
+  }
+}
 
 if (REMOTE_BINDING && !ALLOW_REMOTE_DM) {
   throw new Error(
@@ -343,6 +381,17 @@ const DM_API = new Set([
   "/api/status/upsert",
   "/api/status/remove",
 ]);
+const DM_WRITE_API = new Set([
+  "/api/notes",
+  "/api/reveal/card",
+  "/api/reveal/image",
+  "/api/reveal/text",
+  "/api/reveal/clear",
+  "/api/reveal/remove",
+  "/api/whisper",
+  "/api/status/upsert",
+  "/api/status/remove",
+]);
 
 function sendJson(response, status, data, headers = {}) {
   response.writeHead(status, {
@@ -368,7 +417,69 @@ async function readJson(request) {
   }
 }
 
+function reject(status, message) {
+  throw Object.assign(new Error(message), { status });
+}
+
+function isAllowedOrigin(request, origin) {
+  if (EXPLICIT_ALLOWED_ORIGINS.has(origin)) return true;
+  const parsed = new URL(origin);
+  const expectedProtocol = request.socket.encrypted ? "https:" : "http:";
+  const originPort = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+  const originHost = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return (
+    parsed.protocol === expectedProtocol &&
+    originPort === String(port) &&
+    LOCAL_ORIGIN_HOSTS.has(originHost)
+  );
+}
+
+function enforceWriteRequest(request) {
+  if (!STATE_CHANGING_METHODS.has(request.method)) return;
+
+  const fetchSite = String(request.headers["sec-fetch-site"] || "").toLowerCase();
+  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+    reject(403, "Cross-origin requests are not allowed");
+  }
+
+  const origin = request.headers.origin;
+  if (origin) {
+    let normalized;
+    try {
+      normalized = new URL(origin).origin;
+    } catch {
+      reject(403, "Invalid request origin");
+    }
+    if (!isAllowedOrigin(request, normalized)) {
+      reject(403, "Cross-origin requests are not allowed");
+    }
+  } else if (!isLoopback(request)) {
+    reject(403, "An Origin header is required");
+  }
+
+  const contentType = String(request.headers["content-type"] || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+  if (contentType !== "application/json") {
+    reject(415, "State-changing requests require application/json");
+  }
+}
+
+function requireDmCsrf(request) {
+  if (
+    !dmAuth.verifyCsrf(
+      dmToken(request),
+      request.headers["x-gm-cockpit-csrf"],
+    )
+  ) {
+    reject(403, "Invalid CSRF token");
+  }
+}
+
 async function api(request, response, url) {
+  enforceWriteRequest(request);
+
   if (request.method === "GET" && url.pathname === "/api/health") {
     return sendJson(response, 200, { ok: true, vaultRoot });
   }
@@ -376,7 +487,10 @@ async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/dm/session") {
     const existing = dmAuth.authenticate(dmToken(request));
     if (existing) {
-      return sendJson(response, 200, { session: existing });
+      return sendJson(response, 200, {
+        session: existing,
+        csrfToken: dmAuth.csrfToken(dmToken(request)),
+      });
     }
     if (!ALLOW_LOCAL_DM || !isLoopback(request)) {
       return sendJson(response, 401, { error: "DM login required" });
@@ -385,7 +499,7 @@ async function api(request, response, url) {
     return sendJson(
       response,
       200,
-      { session: created.session },
+      { session: created.session, csrfToken: created.csrfToken },
       { "Set-Cookie": dmCookie(request, created.token) },
     );
   }
@@ -399,7 +513,10 @@ async function api(request, response, url) {
     return sendJson(
       response,
       200,
-      { session: authenticated.session },
+      {
+        session: authenticated.session,
+        csrfToken: authenticated.csrfToken,
+      },
       { "Set-Cookie": dmCookie(request, authenticated.token) },
     );
   }
@@ -409,6 +526,7 @@ async function api(request, response, url) {
     if (!dmAuth.authenticate(token)) {
       return sendJson(response, 401, { error: "DM login required" });
     }
+    requireDmCsrf(request);
     dmAuth.revoke(token);
     return sendJson(
       response,
@@ -422,15 +540,23 @@ async function api(request, response, url) {
     request.method === "POST" &&
     url.pathname === "/api/dm/stream-ticket"
   ) {
-    const ticket = dmAuth.issueStreamTicket(dmToken(request));
-    if (!ticket) {
+    const token = dmToken(request);
+    if (!dmAuth.authenticate(token)) {
       return sendJson(response, 401, { error: "DM login required" });
     }
+    requireDmCsrf(request);
+    const ticket = dmAuth.issueStreamTicket(token);
     return sendJson(response, 200, ticket);
   }
 
   if (DM_API.has(url.pathname) && !isDmAuthorized(request)) {
     return sendJson(response, 401, { error: "DM login required" });
+  }
+  if (
+    STATE_CHANGING_METHODS.has(request.method) &&
+    DM_WRITE_API.has(url.pathname)
+  ) {
+    requireDmCsrf(request);
   }
 
   if (request.method === "POST" && url.pathname === "/api/player/join") {
@@ -557,10 +683,12 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/chat") {
+    const authenticatedPlayer = playerSessions.authenticate(bearerToken(request));
+    if (!authenticatedPlayer && isDmAuthorized(request)) requireDmCsrf(request);
     const body = await readJson(request);
     const text = String(body.text || "").slice(0, 2000);
     if (!text.trim()) return sendJson(response, 400, { error: "Empty message" });
-    const player = playerSessions.authenticate(bearerToken(request));
+    const player = authenticatedPlayer;
     const isDm =
       !player &&
       RESERVED_NAME.test(String(body.from || "").trim()) &&
@@ -843,6 +971,9 @@ async function staticFile(request, response, url) {
 
 const server = createServer(async (request, response) => {
   try {
+    for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
+      response.setHeader(name, value);
+    }
     if (shuttingDown) {
       return sendJson(response, 503, { error: "Server is shutting down" });
     }

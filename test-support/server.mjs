@@ -123,9 +123,16 @@ export async function api(
 }
 
 export async function localDmCookie(base) {
-  const session = await api(base, "GET", "/api/dm/session");
-  if (session.status !== 200) {
-    throw new Error(`Could not create local DM session (${session.status})`);
+  return (await localDmSession(base)).cookie;
+}
+
+export async function localDmSession(base) {
+  const response = await api(base, "GET", "/api/dm/session");
+  if (response.status !== 200) {
+    throw new Error(`Could not create local DM session (${response.status})`);
   }
-  return session.headers.get("set-cookie")?.split(";")[0] || "";
+  return {
+    cookie: response.headers.get("set-cookie")?.split(";")[0] || "",
+    csrfToken: response.data.csrfToken,
+  };
 }

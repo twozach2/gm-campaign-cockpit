@@ -23,6 +23,7 @@ const state = {
   initEditing: new Set(),
   dmStreamConnecting: false,
   dmStreamReconnect: null,
+  dmCsrfToken: null,
 };
 
 const elements = {
@@ -81,6 +82,14 @@ const elements = {
 
 async function request(url, options = {}) {
   const headers = { ...(options.headers || {}) };
+  if (
+    state.dmCsrfToken &&
+    ["POST", "PUT", "PATCH", "DELETE"].includes(
+      String(options.method || "GET").toUpperCase(),
+    )
+  ) {
+    headers["X-GM-Cockpit-CSRF"] = state.dmCsrfToken;
+  }
   const response = await fetch(url, {
     ...options,
     headers,
@@ -1061,7 +1070,8 @@ function hideDmLogin() {
 
 async function ensureDmSession() {
   try {
-    await request("/api/dm/session");
+    const session = await request("/api/dm/session");
+    state.dmCsrfToken = session.csrfToken;
     hideDmLogin();
   } catch (error) {
     if (error.status !== 401) throw error;
@@ -1078,7 +1088,8 @@ elements.dmLoginForm?.addEventListener("submit", async (event) => {
   if (!pin) return;
   if (elements.dmLoginError) elements.dmLoginError.textContent = "";
   try {
-    await postJson("/api/dm/login", { pin });
+    const session = await postJson("/api/dm/login", { pin });
+    state.dmCsrfToken = session.csrfToken;
     hideDmLogin();
     const resolveLogin = dmLoginResolve;
     dmLoginResolve = null;

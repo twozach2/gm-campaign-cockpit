@@ -88,10 +88,13 @@ async function stopTestServer(child) {
   return code;
 }
 
-async function api(base, method, pathname, body, cookie = "") {
+async function api(base, method, pathname, body, dmSession) {
   const headers = {};
   if (body) headers["Content-Type"] = "application/json";
-  if (cookie) headers.Cookie = cookie;
+  if (dmSession) {
+    headers.Cookie = dmSession.cookie;
+    headers["X-GM-Cockpit-CSRF"] = dmSession.csrfToken;
+  }
   const response = await fetch(`${base}${pathname}`, {
     method,
     headers,
@@ -100,10 +103,14 @@ async function api(base, method, pathname, body, cookie = "") {
   return { status: response.status, data: await response.json() };
 }
 
-async function localDmCookie(base) {
+async function localDmSession(base) {
   const response = await fetch(`${base}/api/dm/session`);
   assert.equal(response.status, 200);
-  return response.headers.get("set-cookie").split(";")[0];
+  const data = await response.json();
+  return {
+    cookie: response.headers.get("set-cookie").split(";")[0],
+    csrfToken: data.csrfToken,
+  };
 }
 
 test("atomic JSON store loads missing and valid state", async (t) => {
@@ -307,13 +314,13 @@ test("server startup quarantines malformed trackers and accepts valid state", as
 
   const malformedServer = await startTestServer(root, trackersFile);
   servers.push(malformedServer);
-  const malformedCookie = await localDmCookie(malformedServer.base);
+  const malformedSession = await localDmSession(malformedServer.base);
   const empty = await api(
     malformedServer.base,
     "GET",
     "/api/status",
     undefined,
-    malformedCookie,
+    malformedSession,
   );
   assert.deepEqual(empty.data.status.trackers, []);
   assert.equal(await stopTestServer(malformedServer.child), 0);
@@ -334,13 +341,13 @@ test("server startup quarantines malformed trackers and accepts valid state", as
   await writeFile(trackersFile, JSON.stringify(savedState), "utf8");
   const validServer = await startTestServer(root, trackersFile);
   servers.push(validServer);
-  const validCookie = await localDmCookie(validServer.base);
+  const validSession = await localDmSession(validServer.base);
   const loaded = await api(
     validServer.base,
     "GET",
     "/api/status",
     undefined,
-    validCookie,
+    validSession,
   );
   assert.deepEqual(loaded.data.status.trackers, savedState.trackers);
   assert.equal(await stopTestServer(validServer.child), 0);
@@ -354,12 +361,12 @@ test("rapid tracker API updates persist the final value and shut down cleanly", 
     await stopTestServer(running.child);
     await rm(root, { recursive: true, force: true });
   });
-  const cookie = await localDmCookie(running.base);
+  const dmSession = await localDmSession(running.base);
   const created = await api(running.base, "POST", "/api/status/upsert", {
     name: "Pressure",
     type: "meter",
     max: 1000,
-  }, cookie);
+  }, dmSession);
   const id = created.data.tracker.id;
 
   await Promise.all(
@@ -367,13 +374,13 @@ test("rapid tracker API updates persist the final value and shut down cleanly", 
       api(running.base, "POST", "/api/status/upsert", {
         id,
         value: index + 1,
-      }, cookie),
+      }, dmSession),
     ),
   );
   const final = await api(running.base, "POST", "/api/status/upsert", {
     id,
     value: 100,
-  }, cookie);
+  }, dmSession);
   assert.equal(final.status, 200);
   assert.equal(final.data.tracker.value, 100);
 

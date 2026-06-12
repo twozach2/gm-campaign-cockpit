@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import {
   api as requestApi,
-  localDmCookie,
+  localDmSession,
   startTestServer,
   stopTestServer,
 } from "../test-support/server.mjs";
@@ -12,12 +12,17 @@ let running;
 let base;
 let tavToken;
 let oloToken;
-let dmCookie;
+let dmSession;
 
 function api(method, pathname, body, token) {
   return requestApi(base, method, pathname, body, {
     token,
-    headers: dmCookie ? { Cookie: dmCookie } : {},
+    headers: dmSession
+      ? {
+          Cookie: dmSession.cookie,
+          "X-GM-Cockpit-CSRF": dmSession.csrfToken,
+        }
+      : {},
   });
 }
 
@@ -26,7 +31,7 @@ before(async () => {
     prefix: "gm-cockpit-status-",
   });
   base = running.base;
-  dmCookie = await localDmCookie(base);
+  dmSession = await localDmSession(base);
   tavToken = (
     await api("POST", "/api/player/join", { displayName: "Tav" })
   ).data.token;

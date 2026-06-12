@@ -3,7 +3,7 @@ import test from "node:test";
 import { SessionRegistry } from "../lib/session-registry.mjs";
 import {
   api,
-  localDmCookie,
+  localDmSession,
   startTestServer,
 } from "../test-support/server.mjs";
 
@@ -59,7 +59,7 @@ test("same-name browser cannot read or send another player's whispers", async (t
   const { base } = await startTestServer(t, {
     prefix: "gm-cockpit-identity-",
   });
-  const dmCookie = await localDmCookie(base);
+  const dmSession = await localDmSession(base);
   const first = await api(base, "POST", "/api/player/join", {
     displayName: "Tav",
   });
@@ -109,7 +109,10 @@ test("same-name browser cannot read or send another player's whispers", async (t
     toPlayerId: first.data.player.playerId,
     text: "I saw that.",
   }, {
-    headers: { Cookie: dmCookie },
+    headers: {
+      Cookie: dmSession.cookie,
+      "X-GM-Cockpit-CSRF": dmSession.csrfToken,
+    },
   });
   assert.equal(dmWhisper.status, 200);
   const firstAfter = await api(
