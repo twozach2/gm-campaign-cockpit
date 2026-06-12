@@ -1,9 +1,9 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
-import { randomInt } from "node:crypto";
+import { createHash, randomInt } from "node:crypto";
 import { AtomicJsonStore } from "./lib/atomic-json-store.mjs";
 import {
   apiRoute,
@@ -11,6 +11,7 @@ import {
   parseRouteQuery,
 } from "./lib/api-policy.mjs";
 import { DmAuth } from "./lib/dm-auth.mjs";
+import { TokenBucketRateLimiter } from "./lib/rate-limit.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import { Vault } from "./lib/vault.mjs";
 import { acknowledgeNoteOperation } from "./lib/note-operation.mjs";
@@ -19,6 +20,17 @@ const appRoot = path.dirname(fileURLToPath(import.meta.url));
 const vaultRoot = path.resolve(process.env.VAULT_ROOT || path.join(appRoot, ".."));
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 4173);
+
+function positiveIntegerEnv(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+
 const vault = new Vault({ root: vaultRoot, appRoot });
 const publicRoot = path.join(appRoot, "public");
 
@@ -43,7 +55,27 @@ const ALLOW_LOCAL_DM = process.env.ALLOW_LOCAL_DM !== "false";
 const ALLOW_REMOTE_DM = process.env.ALLOW_REMOTE_DM === "true";
 const REMOTE_BINDING = !["127.0.0.1", "::1", "localhost"].includes(host);
 const DM_COOKIE = "gm-cockpit-dm";
-const CHAT_LIMIT = 200;
+const CHAT_LIMIT = positiveIntegerEnv("MAX_CHAT_MESSAGES", 200);
+const MAX_CLIENTS = positiveIntegerEnv("MAX_CLIENTS", 200);
+const MAX_STREAMS_PER_IP = positiveIntegerEnv("MAX_STREAMS_PER_IP", 40);
+const MAX_STREAMS_PER_IDENTITY = positiveIntegerEnv(
+  "MAX_STREAMS_PER_IDENTITY",
+  4,
+);
+const MAX_PLAYERS = positiveIntegerEnv("MAX_PLAYERS", 100);
+const MAX_DM_SESSIONS = positiveIntegerEnv("MAX_DM_SESSIONS", 32);
+const MAX_STREAM_TICKETS = positiveIntegerEnv("MAX_STREAM_TICKETS", 256);
+const MAX_PRESENTATION_ITEMS = positiveIntegerEnv(
+  "MAX_PRESENTATION_ITEMS",
+  100,
+);
+const MAX_TRACKERS = positiveIntegerEnv("MAX_TRACKERS", 100);
+const MAX_RETAINED_TEXT = positiveIntegerEnv("MAX_RETAINED_TEXT", 600_000);
+const MAX_FILE_BYTES = positiveIntegerEnv(
+  "MAX_FILE_BYTES",
+  25 * 1024 * 1024,
+);
+const MAX_LIMITER_KEYS = positiveIntegerEnv("MAX_LIMITER_KEYS", 2_000);
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const SECURITY_HEADERS = {
   "Content-Security-Policy":
@@ -100,8 +132,18 @@ const presentation = {
 };
 const chat = [];
 const clients = new Set();
-const playerSessions = new SessionRegistry();
-const dmAuth = new DmAuth({ pin: TABLE_PIN });
+const playerSessions = new SessionRegistry({
+  maxPlayers: MAX_PLAYERS,
+  maxTickets: MAX_STREAM_TICKETS,
+});
+const dmAuth = new DmAuth({
+  pin: TABLE_PIN,
+  maxSessions: MAX_DM_SESSIONS,
+  maxTickets: MAX_STREAM_TICKETS,
+});
+const rateLimiter = new TokenBucketRateLimiter({
+  maxKeys: MAX_LIMITER_KEYS,
+});
 let messageSeq = 0;
 let itemSeq = 0;
 
@@ -157,6 +199,7 @@ function isTrackerState(value) {
     !value ||
     typeof value !== "object" ||
     !Array.isArray(value.trackers) ||
+    value.trackers.length > MAX_TRACKERS ||
     !value.trackers.every(isTracker)
   ) {
     return false;
@@ -286,11 +329,55 @@ function broadcast(eventName, payload, message) {
   }
 }
 
+function textSize(value) {
+  return typeof value === "string" ? value.length : 0;
+}
+
+function presentationTextSize() {
+  return presentation.items.reduce(
+    (total, item) =>
+      total +
+      textSize(item.title) +
+      textSize(item.text) +
+      textSize(item.markdown),
+    0,
+  );
+}
+
+function messageTextSize(message) {
+  return (
+    textSize(message.from) +
+    textSize(message.to) +
+    textSize(message.text) +
+    textSize(message.roll ? JSON.stringify(message.roll) : "")
+  );
+}
+
+function chatTextSize() {
+  return chat.reduce((total, message) => total + messageTextSize(message), 0);
+}
+
 function pushChat(message) {
+  const incomingSize = messageTextSize(message);
+  while (
+    chat.length &&
+    (chat.length >= CHAT_LIMIT ||
+      presentationTextSize() + chatTextSize() + incomingSize >
+        MAX_RETAINED_TEXT)
+  ) {
+    chat.shift();
+  }
+  if (
+    presentationTextSize() + chatTextSize() + incomingSize >
+    MAX_RETAINED_TEXT
+  ) {
+    throw Object.assign(new Error("Retained text limit reached"), {
+      status: 409,
+    });
+  }
   message.id = ++messageSeq;
   message.ts = Date.now();
   chat.push(message);
-  if (chat.length > CHAT_LIMIT) chat.splice(0, chat.length - CHAT_LIMIT);
   broadcast(message.scope === "whisper" ? "whisper" : "chat", message, message);
   return message;
 }
@@ -352,6 +439,17 @@ function bearerToken(request) {
   return match?.[1]?.trim() || "";
 }
 
+function clientIp(request) {
+  return String(request.socket.remoteAddress || "unknown").replace(
+    /^::ffff:/,
+    "",
+  );
+}
+
+function hashedLimiterKey(value) {
+  return createHash("sha256").update(String(value)).digest("base64url");
+}
+
 function sendJson(response, status, data, headers = {}) {
   response.writeHead(status, {
     "Content-Type": "application/json; charset=utf-8",
@@ -359,6 +457,15 @@ function sendJson(response, status, data, headers = {}) {
     ...headers,
   });
   response.end(JSON.stringify(data));
+}
+
+function sendRateLimited(response, retryAfterSeconds, message = "Too many requests") {
+  sendJson(
+    response,
+    429,
+    { error: message },
+    { "Retry-After": String(retryAfterSeconds) },
+  );
 }
 
 async function readJson(request, maxBodyBytes) {
@@ -382,6 +489,35 @@ async function readJson(request, maxBodyBytes) {
 
 function reject(status, message) {
   throw Object.assign(new Error(message), { status });
+}
+
+async function assertBoundedFile(filePath) {
+  const metadata = await stat(filePath);
+  if (!metadata.isFile()) reject(400, "Requested path is not a file");
+  if (metadata.size > MAX_FILE_BYTES) {
+    reject(413, `File exceeds the ${MAX_FILE_BYTES}-byte limit`);
+  }
+  return metadata;
+}
+
+async function readBoundedFile(filePath) {
+  await assertBoundedFile(filePath);
+  return readFile(filePath);
+}
+
+function addPresentationItem(item) {
+  if (presentation.items.length >= MAX_PRESENTATION_ITEMS) {
+    reject(409, "Presentation item limit reached");
+  }
+  const incomingSize =
+    textSize(item.title) + textSize(item.text) + textSize(item.markdown);
+  if (
+    presentationTextSize() + chatTextSize() + incomingSize >
+    MAX_RETAINED_TEXT
+  ) {
+    reject(409, "Retained text limit reached");
+  }
+  presentation.items.push(item);
 }
 
 function isAllowedOrigin(request, origin) {
@@ -471,6 +607,31 @@ function authorizeRequest(request, policy) {
   return { role: policy.role };
 }
 
+function rateLimitIdentity(request, authorization) {
+  if (authorization.role === "player" && authorization.player) {
+    return `player:${authorization.player.playerId}`;
+  }
+  if (authorization.role === "dm" && authorization.token) {
+    return `dm:${hashedLimiterKey(authorization.token)}`;
+  }
+  return `ip:${clientIp(request)}`;
+}
+
+function enforceRateLimits(request, response, policy, authorization) {
+  for (const rule of policy.rateLimits) {
+    const key =
+      rule.scope === "identity"
+        ? rateLimitIdentity(request, authorization)
+        : `ip:${clientIp(request)}`;
+    const result = rateLimiter.consume(rule.bucket, key, rule);
+    if (!result.allowed) {
+      sendRateLimited(response, result.retryAfterSeconds);
+      return false;
+    }
+  }
+  return true;
+}
+
 async function api(request, response, url) {
   const policy = apiRoute(url.pathname);
   if (!policy) {
@@ -486,6 +647,7 @@ async function api(request, response, url) {
   }
   if (policy.mutates) enforceWriteRequest(request);
   const authorization = authorizeRequest(request, policy);
+  if (!enforceRateLimits(request, response, policy, authorization)) return;
   const query = parseRouteQuery(policy, url.searchParams);
   const body = policy.parseBody
     ? parseRouteBody(
@@ -595,14 +757,17 @@ async function api(request, response, url) {
   if (request.method === "GET" && url.pathname === "/api/stream") {
     let client;
     if (query.role === "dm") {
-      if (
-        !dmAuth.consumeStreamTicket(query.ticket)
-      ) {
+      const session = dmAuth.consumeStreamTicket(query.ticket);
+      if (!session) {
         return sendJson(response, 401, {
           error: "Invalid or expired DM stream ticket",
         });
       }
-      client = { response, role: "dm" };
+      client = {
+        response,
+        role: "dm",
+        identityKey: `dm:${session.sessionKey}`,
+      };
     } else {
       const player = playerSessions.consumeStreamTicket(
         query.ticket,
@@ -616,7 +781,22 @@ async function api(request, response, url) {
         response,
         role: "player",
         playerId: player.playerId,
+        identityKey: `player:${player.playerId}`,
       };
+    }
+    client.ip = clientIp(request);
+    const streamsFromIp = [...clients].filter(
+      (entry) => entry.ip === client.ip,
+    ).length;
+    const streamsForIdentity = [...clients].filter(
+      (entry) => entry.identityKey === client.identityKey,
+    ).length;
+    if (
+      clients.size >= MAX_CLIENTS ||
+      streamsFromIp >= MAX_STREAMS_PER_IP ||
+      streamsForIdentity >= MAX_STREAMS_PER_IDENTITY
+    ) {
+      return sendRateLimited(response, 60, "Stream connection limit reached");
     }
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -666,7 +846,7 @@ async function api(request, response, url) {
     );
     if (!item) return sendJson(response, 404, { error: "Image is not currently revealed" });
     const filePath = await vault.resolveFilePath(item.campaign, item.file);
-    const content = await readFile(filePath);
+    const content = await readBoundedFile(filePath);
     response.writeHead(200, {
       "Content-Type": mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream",
       "Cache-Control": "no-cache",
@@ -729,20 +909,21 @@ async function api(request, response, url) {
       title: card.title,
       markdown: card.markdown,
     });
-    presentation.items.push(item);
+    addPresentationItem(item);
     emitPresentation();
     return sendJson(response, 200, { ok: true, item });
   }
 
   if (request.method === "POST" && url.pathname === "/api/reveal/image") {
-    await vault.resolveFilePath(body.campaign, body.file);
+    const filePath = await vault.resolveFilePath(body.campaign, body.file);
+    await assertBoundedFile(filePath);
     const basename = String(body.file).split("/").pop();
     const item = makeItem("image", {
       campaign: body.campaign,
       file: body.file,
       title: String(body.title || basename || "Image").slice(0, 120),
     });
-    presentation.items.push(item);
+    addPresentationItem(item);
     emitPresentation();
     return sendJson(response, 200, { ok: true, item });
   }
@@ -752,7 +933,7 @@ async function api(request, response, url) {
     const derived = text.replace(/\s+/g, " ").trim().slice(0, 40) || "Note";
     const title = String(body.title || derived).slice(0, 80);
     const item = makeItem("text", { title, text });
-    presentation.items.push(item);
+    addPresentationItem(item);
     emitPresentation();
     return sendJson(response, 200, { ok: true, item });
   }
@@ -801,6 +982,9 @@ async function api(request, response, url) {
       return sendJson(response, 404, { error: "Tracker not found" });
     }
     if (!tracker) {
+      if (status.trackers.length >= MAX_TRACKERS) {
+        return sendJson(response, 409, { error: "Tracker limit reached" });
+      }
       const name = body.name;
       const type = body.type || "clock";
       tracker =
@@ -885,7 +1069,7 @@ async function api(request, response, url) {
       query.campaign,
       query.file,
     );
-    const content = await readFile(filePath);
+    const content = await readBoundedFile(filePath);
     response.writeHead(200, {
       "Content-Type": mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream",
       "Cache-Control": "no-cache",

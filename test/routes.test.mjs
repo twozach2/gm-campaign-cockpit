@@ -76,6 +76,12 @@ test("route policy enumerates every API handler", async () => {
     assert.ok(Number.isSafeInteger(policy.maxBodyBytes), pathname);
     assert.ok(policy.maxBodyBytes > 0, pathname);
     assert.equal(typeof policy.parseQuery, "function", pathname);
+    assert.ok(Array.isArray(policy.rateLimits), pathname);
+    for (const rule of policy.rateLimits) {
+      assert.ok(["ip", "identity"].includes(rule.scope), pathname);
+      assert.ok(Number.isSafeInteger(rule.capacity) && rule.capacity > 0, pathname);
+      assert.ok(Number.isSafeInteger(rule.windowMs) && rule.windowMs > 0, pathname);
+    }
     if (policy.method === "POST") {
       assert.equal(typeof policy.parseBody, "function", pathname);
     }

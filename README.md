@@ -207,11 +207,14 @@ Player-facing image reveals use the separate "push image" control; embedding
 - API methods, roles, query parameters, body fields, and body-size limits are
   declared in one route policy; invalid or unknown input is rejected before a
   handler changes state.
+- Login, join, chat, ticket, stream, mutation, and file requests have bounded
+  in-memory rate limits. Excess requests return `429` with `Retry-After`.
 - DM event streams use a short-lived, single-use ticket rather than exposing
   the session cookie or PIN in the URL.
 
 Presentation state, player sessions, DM sessions, and chat live in memory and
-reset on every server restart (chat is capped at 200 messages).
+reset on every server restart. Default capacity limits are documented in
+`.env.example` and can be raised for an unusually large trusted-LAN table.
 
 ## Templates & starting a new campaign
 
