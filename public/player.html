@@ -6,35 +6,49 @@
     <title>Player Screen — GM Campaign Cockpit</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23211b16%22/><text x=%225%22 y=%2222%22 fill=%22%23f0b865%22 font-family=%22serif%22 font-size=%2217%22>PL</text></svg>">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/shared.css">
     <link rel="stylesheet" href="/player.css">
   </head>
   <body class="player-body">
     <main class="player-shell">
-      <section id="holding" class="player-holding">
-        <div class="player-holding-inner">
-          <div class="player-mark">PL</div>
-          <h1>At The Table</h1>
-          <p>Waiting for the DM to share something…</p>
+      <nav id="player-nav" class="player-nav" aria-label="Player screen tabs">
+        <button class="player-nav-tab active" type="button" data-tab="shared">Shared<span class="tab-badge hidden" data-badge="shared"></span></button>
+        <button class="player-nav-tab" type="button" data-tab="chat">Chat<span class="tab-badge hidden" data-badge="chat"></span></button>
+        <button class="player-nav-tab" type="button" data-tab="status">Status<span class="tab-badge hidden" data-badge="status"></span></button>
+        <div class="player-nav-spacer"></div>
+        <strong id="player-identity" class="player-nav-identity">Player</strong>
+        <button id="player-rename" type="button" class="ghost-button-sm">Change name</button>
+      </nav>
+
+      <section id="panel-shared" class="player-panel active" aria-label="Shared content">
+        <div id="feed" class="player-feed">
+          <div id="holding" class="player-holding">
+            <div class="player-holding-inner">
+              <div class="player-mark">PL</div>
+              <h1>At The Table</h1>
+              <p>Waiting for the DM to share something…</p>
+            </div>
+          </div>
         </div>
       </section>
 
-      <div id="player-deck" class="player-deck hidden">
-        <nav id="player-tabs" class="player-tabs" aria-label="Shared content"></nav>
-        <article id="stage" class="player-stage markdown-body"></article>
-      </div>
-
-      <aside class="player-chat" aria-label="Table chat">
-        <div class="player-chat-head">
-          <strong id="player-identity">Player</strong>
-          <button id="player-rename" type="button" class="ghost-button-sm">Change name</button>
-        </div>
+      <section id="panel-chat" class="player-panel player-chat" aria-label="Table chat">
         <div id="chat-log" class="player-chat-log"></div>
         <form id="chat-form" class="player-chat-form">
-          <input id="chat-input" type="text" placeholder="Message the table..." maxlength="2000" autocomplete="off">
+          <button id="whisper-toggle" type="button" class="whisper-toggle" title="Whisper to the DM" aria-pressed="false">🤫</button>
+          <input id="chat-input" type="text" placeholder="Message the table... (/roll 2d6+3)" maxlength="2000" autocomplete="off">
           <button type="submit">Send</button>
         </form>
-      </aside>
+      </section>
+
+      <section id="panel-status" class="player-panel" aria-label="Status trackers">
+        <div id="status-list" class="status-list"></div>
+      </section>
     </main>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-label="Enlarged image">
+      <img id="lightbox-img" alt="">
+    </div>
 
     <div id="name-overlay" class="name-overlay">
       <form id="name-form" class="name-card">

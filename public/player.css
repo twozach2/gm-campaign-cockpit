@@ -11,109 +11,137 @@ body.player-body {
   overflow: hidden;
   font-size: clamp(16px, 2vw, 26px);
   background:
-    radial-gradient(circle at 50% -20%, rgba(183, 111, 38, 0.12), transparent 36%),
+    radial-gradient(circle at 50% -20%, rgba(0, 255, 200, 0.08), transparent 36%),
     var(--bg);
   color: var(--text);
 }
 
 .player-shell {
   display: grid;
-  grid-template-rows: 1fr auto;
+  grid-template-rows: auto 1fr;
   height: 100vh;
   width: 100%;
   max-width: 100%;
   overflow: hidden;
 }
 
-.player-holding,
-.player-deck {
-  grid-row: 1;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.player-holding {
-  display: grid;
-  place-items: center;
-  padding: 4vh 6vw;
-}
-
-.player-deck {
-  display: grid;
-  grid-template-rows: auto 1fr;
-}
-
-.player-deck.hidden,
-.player-holding.hidden {
-  display: none;
-}
-
-.player-tabs {
+.player-nav {
   display: flex;
-  gap: 4px;
-  padding: 8px 10px 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  background: rgba(20, 19, 17, 0.92);
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: rgba(16, 13, 35, 0.92);
   border-bottom: 1px solid var(--line);
+  overflow-x: auto;
   scrollbar-width: thin;
 }
 
-.player-tab {
+.player-nav-tab {
+  position: relative;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 7px 16px;
   border: 1px solid var(--line);
-  border-bottom: none;
-  border-radius: 8px 8px 0 0;
+  border-radius: 999px;
   background: var(--panel);
   color: var(--muted);
-  font-size: 0.7em;
+  font-size: 0.75em;
   cursor: pointer;
-  max-width: 220px;
-  white-space: nowrap;
 }
 
-.player-tab .player-tab-title {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.player-tab .player-tab-icon {
-  color: var(--amber);
-  font-size: 0.95em;
-}
-
-.player-tab.active {
+.player-nav-tab.active {
   background: var(--panel-raised);
   color: var(--text);
   border-color: var(--amber);
 }
 
-.player-stage {
-  display: grid;
+.tab-badge {
+  display: inline-grid;
   place-items: center;
-  padding: 4vh 6vw;
-  overflow: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--amber);
+  color: #001107;
+  font-size: 0.85em;
+  font-weight: 700;
+}
+
+.tab-badge.hidden {
+  display: none;
+}
+
+.player-nav-spacer {
+  flex: 1;
+}
+
+.player-nav-identity {
+  color: var(--text);
+  font-size: 0.8em;
+  white-space: nowrap;
+}
+
+.player-panel {
+  display: none;
+  grid-row: 2;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.player-panel.active {
+  display: grid;
+}
+
+#panel-shared.active {
+  grid-template-rows: 1fr;
+}
+
+.player-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px clamp(12px, 4vw, 48px) 24px;
+  overflow-y: auto;
   min-height: 0;
   overflow-wrap: anywhere;
   word-break: break-word;
 }
 
-.player-stage img,
-.player-stage table,
-.player-stage pre {
-  max-width: 100%;
+.player-holding {
+  display: grid;
+  place-items: center;
+  padding: 18vh 6vw;
 }
 
-.player-stage pre,
-.player-stage code {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+.player-holding.hidden {
+  display: none;
+}
+
+.lightbox {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 3vh 3vw;
+  background: rgba(8, 6, 20, 0.94);
+  z-index: 20;
+  cursor: zoom-out;
+}
+
+.lightbox.hidden {
+  display: none;
+}
+
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: var(--shadow);
 }
 
 .player-holding-inner {
@@ -138,61 +166,21 @@ body.player-body {
   width: 64px;
   height: 64px;
   place-items: center;
-  border: 1px solid #855c2e;
+  border: 1px solid #5c35b1;
   border-radius: 14px;
-  background: linear-gradient(145deg, #3c2b1d, #211b16);
+  background: linear-gradient(145deg, #312562, #1d1833);
   color: var(--amber-bright);
   font-family: serif;
   font-size: 28px;
 }
 
-.player-stage {
-  align-content: start;
-}
-
-.player-stage.stage-card {
-  max-width: min(960px, 92vw);
-  margin: 0 auto;
-  padding: 6vh 4vw;
-}
-
-.player-stage.stage-image-wrap {
-  padding: 2vh 2vw;
-}
-
-.player-stage .stage-image {
-  display: block;
-  max-width: 100%;
-  max-height: 88vh;
-  object-fit: contain;
-  margin: 0 auto;
-  border-radius: 10px;
-  box-shadow: var(--shadow);
-}
-
-.player-stage.stage-text-wrap .stage-text {
-  font-size: 1.6em;
-  line-height: 1.4;
-  text-align: center;
-  white-space: pre-wrap;
-  max-width: min(820px, 90vw);
-  color: var(--text);
-}
-
-.player-stage.hidden,
-.player-holding.hidden {
-  display: none;
+#panel-status.active {
+  grid-template-rows: 1fr;
 }
 
 .player-chat {
-  grid-row: 2;
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  min-width: 0;
-  max-width: 100%;
-  max-height: 36vh;
-  border-top: 1px solid var(--line);
-  background: rgba(20, 19, 17, 0.92);
+  grid-template-rows: 1fr auto;
+  background: rgba(16, 13, 35, 0.4);
 }
 
 .player-chat-log,
@@ -202,20 +190,6 @@ body.player-body {
   max-width: 100%;
   overflow-wrap: anywhere;
   word-break: break-word;
-}
-
-.player-chat-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--line);
-  color: var(--muted);
-  font-size: 0.85em;
-}
-
-.player-chat-head strong {
-  color: var(--text);
 }
 
 .ghost-button-sm {
@@ -274,10 +248,31 @@ body.player-body {
 
 .player-chat-form {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: auto 1fr auto;
   gap: 8px;
   padding: 10px 14px;
   border-top: 1px solid var(--line);
+}
+
+.whisper-toggle {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--muted);
+  font-size: 1em;
+  cursor: pointer;
+}
+
+.whisper-toggle.active {
+  background: var(--amber-soft);
+  border-color: var(--amber);
+  color: var(--amber-bright);
+}
+
+.player-chat-form.whispering input {
+  border-color: var(--amber);
+  background: var(--amber-soft);
 }
 
 .player-chat-form input {
@@ -298,7 +293,7 @@ body.player-body {
   border: none;
   border-radius: 8px;
   padding: 8px 18px;
-  color: #1c150d;
+  color: #001107;
   font-weight: 600;
   cursor: pointer;
 }
@@ -308,7 +303,7 @@ body.player-body {
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(10, 9, 8, 0.88);
+  background: rgba(8, 6, 20, 0.88);
   z-index: 10;
 }
 
@@ -351,7 +346,7 @@ body.player-body {
   border: none;
   border-radius: 8px;
   padding: 10px 16px;
-  color: #1c150d;
+  color: #001107;
   font-weight: 600;
   cursor: pointer;
 }

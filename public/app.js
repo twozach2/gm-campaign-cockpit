@@ -1,4 +1,4 @@
-import { renderMarkdown, escapeHtml, IMAGE_EXT } from "/render.mjs";
+import { renderMarkdown, escapeHtml, IMAGE_EXT, feedEntryHtml, trackerHtml, rollHtml } from "/render.mjs";
 
 const state = {
   campaigns: [],
@@ -13,6 +13,8 @@ const state = {
   dmStream: null,
   chatRendered: new Set(),
   revealedItems: [],
+  trackers: [],
+  initEditing: new Set(),
 };
 
 const elements = {
@@ -53,6 +55,15 @@ const elements = {
   revealedList: document.querySelector("#revealed-list"),
   revealedWrap: document.querySelector("#revealed-wrap"),
   revealedCount: document.querySelector("#revealed-count"),
+  trackerList: document.querySelector("#tracker-list"),
+  trackerForm: document.querySelector("#tracker-form"),
+  trackerName: document.querySelector("#tracker-name"),
+  trackerType: document.querySelector("#tracker-type"),
+  trackerMax: document.querySelector("#tracker-max"),
+  previewOpen: document.querySelector("#preview-open"),
+  previewModal: document.querySelector("#preview-modal"),
+  previewClose: document.querySelector("#preview-close"),
+  previewBody: document.querySelector("#preview-body"),
 };
 
 async function request(url, options = {}) {
@@ -558,6 +569,10 @@ document.addEventListener("keydown", (event) => {
     closeValidate();
     return;
   }
+  if (event.key === "Escape" && elements.previewModal && !elements.previewModal.classList.contains("hidden")) {
+    closePreview();
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
     event.preventDefault();
     saveNotes();
@@ -647,12 +662,17 @@ function appendDmMessage(message) {
   if (!message || !elements.chatLogDm || state.chatRendered.has(message.id)) return;
   state.chatRendered.add(message.id);
   const isWhisper = message.scope === "whisper";
-  const label = isWhisper
-    ? `Whisper → ${escapeHtml(message.to || "")}`
-    : escapeHtml(message.from || "Anon");
+  const isSecret = message.scope === "secret";
+  const isRoll = message.type === "roll";
+  let label;
+  if (isSecret) label = "Secret roll";
+  else if (isWhisper && message.from === "DM") label = `Whisper → ${escapeHtml(message.to || "")}`;
+  else if (isWhisper) label = `${escapeHtml(message.from || "Anon")} → you (whisper)`;
+  else label = escapeHtml(message.from || "Anon");
+  const body = isRoll ? rollHtml(message.roll) : escapeHtml(message.text || "");
   const node = document.createElement("div");
-  node.className = `chat-msg${isWhisper ? " whisper" : ""}`;
-  node.innerHTML = `<span class="chat-from">${label}</span><span class="chat-text">${escapeHtml(message.text || "")}</span>`;
+  node.className = `chat-msg${isWhisper ? " whisper" : ""}${isSecret ? " secret" : ""}${isRoll ? " roll" : ""}`;
+  node.innerHTML = `<span class="chat-from">${label}</span><span class="chat-text">${body}</span>`;
   elements.chatLogDm.appendChild(node);
   elements.chatLogDm.scrollTop = elements.chatLogDm.scrollHeight;
 }
@@ -680,9 +700,80 @@ function connectDmStream() {
   es.addEventListener("whisper", (event) => appendDmMessage(JSON.parse(event.data)));
   es.addEventListener("presence", (event) => updatePlayers(JSON.parse(event.data).players));
   es.addEventListener("reveal-set", (event) => renderRevealed(JSON.parse(event.data).items || []));
+  es.addEventListener("status-set", (event) => renderTrackers(JSON.parse(event.data).trackers || []));
   es.onerror = () => {
     /* browser auto-reconnects */
   };
+}
+
+function trackerMeterColor(ratio) {
+  return `hsl(${(Math.round(96 - 111 * ratio) + 360) % 360} 100% 60%)`;
+}
+
+function trackerRowHtml(t) {
+  const visLabel = t.hidden ? "Hidden from players — click to show" : "Visible to players — click to hide";
+  const visButtons = `<button class="tracker-btn" type="button" data-tracker-vis title="${visLabel}" aria-label="${visLabel}">${t.hidden ? "🚫" : "👁"}</button>
+            <button class="tracker-btn tracker-x" type="button" data-tracker-remove aria-label="Delete ${escapeHtml(t.name)}">×</button>`;
+  if (t.type === "initiative") {
+    const entries = t.entries || [];
+    const count = entries.length ? `${t.turn + 1}/${entries.length}` : "—";
+    const editing = state.initEditing.has(t.id);
+    const editor = editing
+      ? `<div class="tracker-edit">
+            <textarea data-init-entries placeholder="One combatant per line, in turn order">${escapeHtml(entries.join("\n"))}</textarea>
+            <span class="tracker-edit-hint">One name per line, top goes first.</span>
+            <button type="button" data-init-save>Save order</button>
+          </div>`
+      : "";
+    return `<div class="tracker-row${t.hidden ? " is-hidden" : ""}" data-tracker-id="${t.id}">
+            <span class="tracker-kind" title="Initiative">⚔</span>
+            <span class="tracker-row-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}${entries.length && !t.hidden ? ` — ${escapeHtml(entries[t.turn] || "")}` : ""}</span>
+            <span class="tracker-row-value" style="color:var(--amber)">${count}</span>
+            <button class="tracker-btn" type="button" data-tracker-turn="-1" aria-label="Previous turn">◀</button>
+            <button class="tracker-btn" type="button" data-tracker-turn="1" aria-label="Next turn">▶</button>
+            <button class="tracker-btn" type="button" data-tracker-edit title="Edit combatants" aria-label="Edit combatants">✎</button>
+            ${visButtons}
+            ${editor}
+          </div>`;
+  }
+  const ratio = t.max ? t.value / t.max : 0;
+  const color = t.type === "meter" ? trackerMeterColor(ratio) : "var(--amber)";
+  const icon = t.type === "meter" ? "▮" : "◔";
+  return `<div class="tracker-row${t.hidden ? " is-hidden" : ""}" data-tracker-id="${t.id}">
+            <span class="tracker-kind" title="${t.type === "meter" ? "Meter" : "Clock"}">${icon}</span>
+            <span class="tracker-row-name" title="${escapeHtml(t.name)}">${escapeHtml(t.name)}</span>
+            <span class="tracker-row-value" style="color:${color}">${t.value}/${t.max}</span>
+            <button class="tracker-btn" type="button" data-tracker-step="-1" aria-label="Decrease ${escapeHtml(t.name)}">−</button>
+            <button class="tracker-btn" type="button" data-tracker-step="1" aria-label="Increase ${escapeHtml(t.name)}">+</button>
+            ${visButtons}
+          </div>`;
+}
+
+function renderTrackers(trackers) {
+  state.trackers = trackers;
+  if (!elements.trackerList) return;
+  const drafts = new Map();
+  elements.trackerList.querySelectorAll("[data-tracker-id]").forEach((row) => {
+    const textarea = row.querySelector("[data-init-entries]");
+    if (textarea) drafts.set(Number(row.dataset.trackerId), textarea.value);
+  });
+  elements.trackerList.innerHTML = trackers.length
+    ? trackers.map(trackerRowHtml).join("")
+    : '<p class="empty-state">No trackers yet.</p>';
+  for (const [id, draft] of drafts) {
+    const textarea = elements.trackerList.querySelector(`[data-tracker-id="${id}"] [data-init-entries]`);
+    if (textarea) textarea.value = draft;
+  }
+  renderPreview();
+}
+
+async function syncTrackers() {
+  try {
+    const { status } = await request("/api/status");
+    renderTrackers(status?.trackers || []);
+  } catch {
+    /* ignore */
+  }
 }
 
 function renderRevealed(items) {
@@ -704,7 +795,40 @@ function renderRevealed(items) {
   }
   paintPushCardActiveStates();
   paintPushImageActiveState();
+  renderPreview();
 }
+
+function renderPreview() {
+  if (!elements.previewBody || !elements.previewModal || elements.previewModal.classList.contains("hidden")) {
+    return;
+  }
+  const items = state.revealedItems || [];
+  const trackers = (state.trackers || []).filter((t) => !t.hidden);
+  const feed = items.length
+    ? items.map((item) => feedEntryHtml(item, { imageUrl: (i) => `/api/player/image?id=${i.id}` })).join("")
+    : '<div class="status-empty">Waiting for the DM to share something…</div>';
+  const status = trackers.length
+    ? trackers.map(trackerHtml).join("")
+    : '<div class="status-empty">Nothing tracked right now.</div>';
+  elements.previewBody.innerHTML = `
+    <div class="preview-section"><span class="eyebrow">Shared tab</span><div class="preview-feed">${feed}</div></div>
+    <div class="preview-section"><span class="eyebrow">Status tab</span><div class="status-list">${status}</div></div>`;
+}
+
+function openPreview() {
+  elements.previewModal?.classList.remove("hidden");
+  renderPreview();
+}
+
+function closePreview() {
+  elements.previewModal?.classList.add("hidden");
+}
+
+elements.previewOpen?.addEventListener("click", openPreview);
+elements.previewClose?.addEventListener("click", closePreview);
+elements.previewModal?.addEventListener("click", (event) => {
+  if (event.target === elements.previewModal) closePreview();
+});
 
 elements.revealedList?.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-retract]");
@@ -712,6 +836,57 @@ elements.revealedList?.addEventListener("click", async (event) => {
   const id = Number(button.dataset.retract);
   try {
     await postJson("/api/reveal/remove", { id });
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+elements.trackerList?.addEventListener("click", async (event) => {
+  const row = event.target.closest("[data-tracker-id]");
+  if (!row) return;
+  const id = Number(row.dataset.trackerId);
+  const tracker = state.trackers.find((t) => t.id === id);
+  if (!tracker) return;
+  try {
+    const step = event.target.closest("[data-tracker-step]");
+    const turn = event.target.closest("[data-tracker-turn]");
+    if (step) {
+      await postJson("/api/status/upsert", { id, value: tracker.value + Number(step.dataset.trackerStep) });
+    } else if (turn) {
+      await postJson("/api/status/upsert", { id, turn: (tracker.turn || 0) + Number(turn.dataset.trackerTurn) });
+    } else if (event.target.closest("[data-tracker-edit]")) {
+      if (state.initEditing.has(id)) state.initEditing.delete(id);
+      else state.initEditing.add(id);
+      renderTrackers(state.trackers);
+    } else if (event.target.closest("[data-init-save]")) {
+      const textarea = row.querySelector("[data-init-entries]");
+      const entries = (textarea?.value || "").split("\n").map((line) => line.trim()).filter(Boolean);
+      state.initEditing.delete(id);
+      await postJson("/api/status/upsert", { id, entries });
+    } else if (event.target.closest("[data-tracker-vis]")) {
+      await postJson("/api/status/upsert", { id, hidden: !tracker.hidden });
+    } else if (event.target.closest("[data-tracker-remove]")) {
+      state.initEditing.delete(id);
+      await postJson("/api/status/remove", { id });
+    }
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+elements.trackerForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const name = elements.trackerName.value.trim();
+  if (!name) return;
+  try {
+    const type = elements.trackerType.value;
+    const { tracker } = await postJson("/api/status/upsert", {
+      name,
+      type,
+      max: type === "initiative" ? undefined : Number(elements.trackerMax.value) || undefined,
+    });
+    if (type === "initiative" && tracker) state.initEditing.add(tracker.id);
+    elements.trackerName.value = "";
   } catch (error) {
     showToast(error.message);
   }
@@ -940,6 +1115,7 @@ async function bootstrap() {
   await ensurePin();
   await loadCampaigns();
   await syncDmChat();
+  await syncTrackers();
   connectDmStream();
 }
 

@@ -6,6 +6,7 @@
     <title>GM Campaign Cockpit</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 32 32%22><rect width=%2232%22 height=%2232%22 rx=%227%22 fill=%22%23211b16%22/><text x=%225%22 y=%2222%22 fill=%22%23f0b865%22 font-family=%22serif%22 font-size=%2217%22>GM</text></svg>">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/shared.css">
   </head>
   <body>
     <div class="app-shell">
@@ -101,7 +102,10 @@
               <span class="eyebrow">Broadcast</span>
               <h2>Player Screen</h2>
             </div>
-            <span id="player-count" class="player-count">0 connected</span>
+            <div class="rail-heading-side">
+              <span id="player-count" class="player-count">0 connected</span>
+              <button id="preview-open" type="button" class="ghost-button" title="See what players see right now">Preview</button>
+            </div>
           </div>
           <div id="push-cards" class="push-cards"></div>
           <textarea id="push-text" class="push-text" placeholder="Push a note to the table..."></textarea>
@@ -115,6 +119,20 @@
               <span id="revealed-count" class="revealed-count">0</span>
             </div>
             <div id="revealed-list" class="revealed-list" aria-label="Currently revealed items"></div>
+          </div>
+          <div class="tracker-block">
+            <span class="eyebrow">Status Trackers</span>
+            <div id="tracker-list" class="tracker-list"></div>
+            <form id="tracker-form" class="tracker-form">
+              <input id="tracker-name" type="text" placeholder="e.g. Pursuit" maxlength="80" autocomplete="off">
+              <select id="tracker-type" title="Tracker style">
+                <option value="clock">Clock</option>
+                <option value="meter">Meter</option>
+                <option value="initiative">Initiative</option>
+              </select>
+              <input id="tracker-max" type="number" min="1" max="1000" value="8" title="Segments / range max">
+              <button type="submit">Add</button>
+            </form>
           </div>
           <div class="table-chat">
             <div id="chat-log-dm" class="chat-log"></div>
@@ -139,6 +157,19 @@
           <button id="validate-close" class="icon-button" type="button" aria-label="Close">×</button>
         </div>
         <div id="validate-body" class="validate-body"></div>
+      </div>
+    </div>
+
+    <div id="preview-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="preview-title">
+      <div class="modal-card preview-card">
+        <div class="modal-header">
+          <div>
+            <span class="eyebrow">Live preview</span>
+            <h2 id="preview-title">What players see</h2>
+          </div>
+          <button id="preview-close" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+        <div id="preview-body" class="preview-stage"></div>
       </div>
     </div>
 

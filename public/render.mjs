@@ -225,3 +225,81 @@ export function renderMarkdown(markdown = "", options = {}) {
 
   return output.join("\n");
 }
+
+export function formatTime(ts) {
+  if (!ts) return "";
+  return new Date(ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+export function meterColor(ratio) {
+  return `hsl(${(Math.round(96 - 111 * ratio) + 360) % 360} 100% 60%)`;
+}
+
+export function clockSvg(max, value) {
+  const cx = 50;
+  const cy = 50;
+  const r = 42;
+  const gap = max > 1 ? Math.min(0.09, 1.4 / max) : 0.0002;
+  let paths = "";
+  for (let i = 0; i < max; i++) {
+    const a0 = -Math.PI / 2 + (i / max) * Math.PI * 2 + gap;
+    const a1 = -Math.PI / 2 + ((i + 1) / max) * Math.PI * 2 - gap;
+    const large = a1 - a0 > Math.PI ? 1 : 0;
+    const x0 = (cx + r * Math.cos(a0)).toFixed(2);
+    const y0 = (cy + r * Math.sin(a0)).toFixed(2);
+    const x1 = (cx + r * Math.cos(a1)).toFixed(2);
+    const y1 = (cy + r * Math.sin(a1)).toFixed(2);
+    paths += `<path d="M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}" class="clock-seg${i < value ? " filled" : ""}"></path>`;
+  }
+  return `<svg class="clock-svg" viewBox="0 0 100 100" role="img" aria-label="${value} of ${max}">${paths}<text x="50" y="55" class="clock-count">${value}/${max}</text></svg>`;
+}
+
+export function trackerHtml(tracker) {
+  if (tracker.type === "initiative") {
+    const entries = tracker.entries || [];
+    const turn = Number.isInteger(tracker.turn) ? tracker.turn : 0;
+    const list = entries.length
+      ? `<ol class="init-list">${entries
+          .map((entry, i) => `<li class="init-entry${i === turn ? " current" : ""}">${escapeHtml(entry)}</li>`)
+          .join("")}</ol>`
+      : '<div class="init-empty">No combatants yet.</div>';
+    const count = entries.length ? `${turn + 1} / ${entries.length}` : "—";
+    return `<div class="tracker tracker-initiative"><div class="tracker-head"><span class="tracker-name">${escapeHtml(tracker.name)}</span><span class="tracker-count">${count}</span></div>${list}</div>`;
+  }
+  if (tracker.type === "meter") {
+    const ratio = tracker.max ? tracker.value / tracker.max : 0;
+    const color = meterColor(ratio);
+    return `<div class="tracker tracker-meter"><div class="tracker-head"><span class="tracker-name">${escapeHtml(tracker.name)}</span><span class="tracker-count" style="color:${color}">${tracker.value} / ${tracker.max}</span></div><div class="meter-bar"><div class="meter-fill" style="width:${Math.round(ratio * 100)}%;background:${color}"></div></div></div>`;
+  }
+  return `<div class="tracker tracker-clock">${clockSvg(tracker.max, tracker.value)}<span class="tracker-name">${escapeHtml(tracker.name)}</span></div>`;
+}
+
+export function feedEntryHtml(item, options = {}) {
+  const imageUrl = options.imageUrl || (() => "");
+  const fileUrl = options.fileUrl || (() => "");
+  const icon = item.type === "image" ? "🖼" : item.type === "text" ? "✎" : "✦";
+  const head = `<header class="feed-head"><span class="feed-icon">${icon}</span><span class="feed-title">${escapeHtml(item.title || "Untitled")}</span><time class="feed-time">${formatTime(item.ts)}</time></header>`;
+  let body;
+  if (item.type === "card") {
+    body = `<div class="feed-body markdown-body">${renderMarkdown(item.markdown || "", { fileUrl })}</div>`;
+  } else if (item.type === "image") {
+    body = `<div class="feed-body"><img class="feed-image" src="${escapeHtml(imageUrl(item))}" alt="${escapeHtml(item.title || "Shared image")}" loading="lazy"></div>`;
+  } else {
+    body = `<div class="feed-body feed-text">${escapeHtml(item.text || "")}</div>`;
+  }
+  return `<article class="feed-entry feed-${item.type}">${head}${body}</article>`;
+}
+
+export function rollHtml(roll) {
+  if (!roll || !Array.isArray(roll.parts)) return "";
+  const detail = roll.parts
+    .map((part, index) => {
+      const sign = index === 0 ? (part.sign < 0 ? "−" : "") : part.sign < 0 ? " − " : " + ";
+      if (part.kind === "dice") {
+        return `${sign}[${(part.rolls || []).join(", ")}]`;
+      }
+      return `${sign}${part.value}`;
+    })
+    .join("");
+  return `<span class="roll-result"><span class="roll-dice">🎲</span><span class="roll-expr">${escapeHtml(roll.expr || "")}</span><span class="roll-detail">${escapeHtml(detail)}</span><span class="roll-total">${roll.total}</span></span>`;
+}

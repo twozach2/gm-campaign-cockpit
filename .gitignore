@@ -1,48 +1,57 @@
 # --- Node ---
-  node_modules/
-  npm-debug.log*
-  yarn-debug.log*
-  yarn-error.log*
-  .pnpm-debug.log*
-  # --- Environment ---
-  # Never commit local configuration. Use .env.example as the template.
-  .env
-  .env.local
-  .env.*.local
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
-  # --- Runtime data ---
-  # Session notes backups are user-specific and machine-local.
-  data/backups/
-  data/*.bak
-  data/*.tmp
-  # --- macOS ---
-  .DS_Store
-  .AppleDouble
-  .LSOverride
-  Icon?
-  ._*
-  # --- Windows ---
-  Thumbs.db
-  ehthumbs.db
-  Desktop.ini
-  $RECYCLE.BIN/
+# --- Environment ---
+# Never commit local configuration. Use .env.example as the template.
+.env
+.env.local
+.env.*.local
 
-  # --- Linux ---
-  *~
-  .fuse_hidden*
-  .directory
-  .Trash-*
-  # --- Editors ---
-  .vscode/
-  .idea/
-  *.swp
-  *.swo
-  *.sublime-workspace
-  *.sublime-project
+# --- Runtime data ---
+# Session notes backups are user-specific and machine-local.
+data/backups/
+data/*.bak
+data/*.tmp
 
-  # --- Build / cache artifacts (forward-compat in case deps are ever added) ---
-  dist/
-  build/
-  .cache/
-  coverage/
-  *.tsbuildinfo
+# --- macOS ---
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+
+# --- Windows ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# --- Linux ---
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+# --- Editors ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+*.sublime-project
+
+# --- Build / cache artifacts (forward-compat in case deps are ever added) ---
+dist/
+build/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# --- Local notes that shouldn't be public ---
+# Uncomment if you ever drop personal notes into the repo root.
+# NOTES.md
+# TODO.md

@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import os from "node:os";
@@ -40,6 +40,44 @@ const clients = new Set();
 let messageSeq = 0;
 let itemSeq = 0;
 
+const TRACKERS_FILE = process.env.TRACKERS_FILE || path.join(appRoot, "data", "trackers.json");
+const status = {
+  trackers: [],
+  updatedAt: Date.now(),
+};
+let trackerSeq = 0;
+
+async function loadTrackers() {
+  try {
+    const saved = JSON.parse(await readFile(TRACKERS_FILE, "utf8"));
+    if (Array.isArray(saved.trackers)) {
+      status.trackers = saved.trackers;
+      trackerSeq = status.trackers.reduce((max, t) => Math.max(max, Number(t.id) || 0), 0);
+    }
+  } catch {
+    /* no saved trackers yet */
+  }
+}
+
+function saveTrackers() {
+  mkdir(path.dirname(TRACKERS_FILE), { recursive: true })
+    .then(() => writeFile(TRACKERS_FILE, JSON.stringify({ trackers: status.trackers }, null, 2)))
+    .catch((error) => console.error(`Failed to save trackers: ${error.message}`));
+}
+
+function statusFor(role) {
+  if (role === "dm") return status;
+  return { trackers: status.trackers.filter((t) => !t.hidden), updatedAt: status.updatedAt };
+}
+
+function emitStatus() {
+  status.updatedAt = Date.now();
+  for (const client of clients) {
+    writeEvent(client, "status-set", statusFor(client.role));
+  }
+  saveTrackers();
+}
+
 function emitPresentation() {
   presentation.updatedAt = Date.now();
   broadcast("reveal-set", presentation);
@@ -61,7 +99,65 @@ function writeEvent(client, eventName, payload) {
 function visibleToClient(client, message) {
   if (message.scope === "table") return true;
   if (client.role === "dm") return true;
-  return client.role === "player" && client.name === message.to;
+  if (message.scope === "secret") return false;
+  return client.role === "player" && (client.name === message.to || client.name === message.from);
+}
+
+function chatVisibleToPlayer(message, name) {
+  if (message.scope === "table") return true;
+  if (message.scope === "secret") return false;
+  return Boolean(name) && (message.to === name || message.from === name);
+}
+
+const RESERVED_NAME = /^dm$/i;
+
+const MAX_ROLL_TERMS = 10;
+const MAX_DICE = 100;
+const MAX_SIDES = 1000;
+
+function parseRoll(expression) {
+  const cleaned = String(expression || "").replace(/\s+/g, "").toLowerCase();
+  if (!cleaned) return null;
+  const tokens = cleaned.match(/[+-]?[^+-]+/g);
+  if (!tokens || tokens.length > MAX_ROLL_TERMS) return null;
+  const parts = [];
+  for (const token of tokens) {
+    const sign = token.startsWith("-") ? -1 : 1;
+    const body = token.replace(/^[+-]/, "");
+    const dice = body.match(/^(\d*)d(\d+)$/);
+    if (dice) {
+      const count = dice[1] ? Number(dice[1]) : 1;
+      const sides = Number(dice[2]);
+      if (count < 1 || count > MAX_DICE || sides < 2 || sides > MAX_SIDES) return null;
+      parts.push({ kind: "dice", sign, count, sides });
+    } else if (/^\d+$/.test(body)) {
+      parts.push({ kind: "mod", sign, value: Number(body) });
+    } else {
+      return null;
+    }
+  }
+  if (!parts.some((part) => part.kind === "dice")) return null;
+  return parts;
+}
+
+function executeRoll(parts) {
+  let total = 0;
+  const rolled = parts.map((part) => {
+    if (part.kind === "dice") {
+      const rolls = Array.from({ length: part.count }, () => 1 + Math.floor(Math.random() * part.sides));
+      total += part.sign * rolls.reduce((sum, value) => sum + value, 0);
+      return { ...part, rolls };
+    }
+    total += part.sign * part.value;
+    return { ...part };
+  });
+  const expr = rolled
+    .map((part, index) => {
+      const sign = index === 0 ? (part.sign < 0 ? "-" : "") : part.sign < 0 ? "-" : "+";
+      return part.kind === "dice" ? `${sign}${part.count}d${part.sides}` : `${sign}${part.value}`;
+    })
+    .join("");
+  return { expr, parts: rolled, total };
 }
 
 function broadcast(eventName, payload, message) {
@@ -117,6 +213,9 @@ const DM_API = new Set([
   "/api/reveal/clear",
   "/api/reveal/remove",
   "/api/whisper",
+  "/api/status",
+  "/api/status/upsert",
+  "/api/status/remove",
 ]);
 
 function sendJson(response, status, data) {
@@ -156,7 +255,8 @@ async function api(request, response, url) {
     if (role === "dm" && !isDmAuthorized(request, url)) {
       return sendJson(response, 401, { error: "PIN required" });
     }
-    const name = (url.searchParams.get("name") || "").slice(0, 60);
+    let name = (url.searchParams.get("name") || "").slice(0, 60);
+    if (role === "player" && RESERVED_NAME.test(name.trim())) name = "";
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -165,6 +265,8 @@ async function api(request, response, url) {
     response.write(`event: hello\ndata: ${JSON.stringify({ role, name })}\n\n`);
     const client = { response, role, name };
     clients.add(client);
+    writeEvent(client, "reveal-set", presentation);
+    writeEvent(client, "status-set", statusFor(role));
     broadcast("presence", { players: connectedPlayerNames() });
     request.on("close", () => {
       clients.delete(client);
@@ -174,9 +276,14 @@ async function api(request, response, url) {
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/state") {
-    const name = url.searchParams.get("name") || "";
-    const messages = chat.filter((m) => m.scope === "table" || m.to === name);
-    return sendJson(response, 200, { presentation, chat: messages });
+    let name = url.searchParams.get("name") || "";
+    const asDm = RESERVED_NAME.test(name.trim()) && isDmAuthorized(request, url);
+    if (asDm) {
+      return sendJson(response, 200, { presentation, chat, status: statusFor("dm") });
+    }
+    if (RESERVED_NAME.test(name.trim())) name = "";
+    const messages = chat.filter((m) => chatVisibleToPlayer(m, name));
+    return sendJson(response, 200, { presentation, chat: messages, status: statusFor("player") });
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/image") {
@@ -194,10 +301,30 @@ async function api(request, response, url) {
 
   if (request.method === "POST" && url.pathname === "/api/chat") {
     const body = await readJson(request);
-    const from = String(body.from || "Anon").slice(0, 60);
+    let from = String(body.from || "Anon").trim().slice(0, 60) || "Anon";
     const text = String(body.text || "").slice(0, 2000);
     if (!text.trim()) return sendJson(response, 400, { error: "Empty message" });
-    const message = pushChat({ scope: "table", from, text });
+    const isDm = RESERVED_NAME.test(from) && isDmAuthorized(request, url);
+    if (!isDm && RESERVED_NAME.test(from)) from = "Anon";
+    const whisper = Boolean(body.whisper) && !isDm;
+    const command = text.trim().match(/^\/(s?roll|r)(?:\s+(.*))?$/i);
+    if (command) {
+      const secret = command[1].toLowerCase() === "sroll";
+      if (secret && !isDm) {
+        return sendJson(response, 403, { error: "Only the DM can make secret rolls" });
+      }
+      const parts = parseRoll(command[2]);
+      if (!parts) {
+        return sendJson(response, 400, { error: "Could not read that roll — try /roll 2d6+3" });
+      }
+      const roll = executeRoll(parts);
+      const scope = secret ? "secret" : whisper ? "whisper" : "table";
+      const message = pushChat({ scope, from, ...(scope === "whisper" ? { to: "DM" } : {}), type: "roll", roll });
+      return sendJson(response, 200, { message });
+    }
+    const message = whisper
+      ? pushChat({ scope: "whisper", from, to: "DM", text })
+      : pushChat({ scope: "table", from, text });
     return sendJson(response, 200, { message });
   }
 
@@ -278,6 +405,68 @@ async function api(request, response, url) {
     if (!to || !text.trim()) return sendJson(response, 400, { error: "to and text required" });
     const message = pushChat({ scope: "whisper", from: "DM", to, text });
     return sendJson(response, 200, { message });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/status") {
+    return sendJson(response, 200, { status });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/status/upsert") {
+    const body = await readJson(request);
+    const id = body.id === undefined ? null : Number(body.id);
+    let tracker = id === null ? null : status.trackers.find((t) => t.id === id);
+    if (id !== null && !tracker) {
+      return sendJson(response, 404, { error: "Tracker not found" });
+    }
+    if (!tracker) {
+      const name = String(body.name || "").trim().slice(0, 80);
+      if (!name) return sendJson(response, 400, { error: "Tracker name required" });
+      const type = body.type === "meter" ? "meter" : body.type === "initiative" ? "initiative" : "clock";
+      tracker =
+        type === "initiative"
+          ? { id: ++trackerSeq, type, name, entries: [], turn: 0, hidden: false }
+          : { id: ++trackerSeq, type, name, max: type === "meter" ? 10 : 4, value: 0, hidden: false };
+      status.trackers.push(tracker);
+    } else if (body.name !== undefined) {
+      tracker.name = String(body.name).trim().slice(0, 80) || tracker.name;
+    }
+    if (body.hidden !== undefined) tracker.hidden = Boolean(body.hidden);
+    if (tracker.type === "initiative") {
+      if (body.entries !== undefined) {
+        tracker.entries = (Array.isArray(body.entries) ? body.entries : [])
+          .map((entry) => String(entry).trim().slice(0, 60))
+          .filter(Boolean)
+          .slice(0, 40);
+      }
+      if (body.turn !== undefined) {
+        const turn = Math.round(Number(body.turn)) || 0;
+        const count = tracker.entries.length;
+        tracker.turn = count ? ((turn % count) + count) % count : 0;
+      }
+      tracker.turn = Math.max(0, Math.min(tracker.turn, Math.max(0, tracker.entries.length - 1)));
+    } else {
+      if (body.max !== undefined) {
+        tracker.max = Math.max(1, Math.min(1000, Math.round(Number(body.max)) || 1));
+      }
+      if (body.value !== undefined) {
+        tracker.value = Math.round(Number(body.value)) || 0;
+      }
+      tracker.value = Math.max(0, Math.min(tracker.max, tracker.value));
+    }
+    emitStatus();
+    return sendJson(response, 200, { ok: true, tracker });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/status/remove") {
+    const body = await readJson(request);
+    const id = Number(body.id);
+    const before = status.trackers.length;
+    status.trackers = status.trackers.filter((t) => t.id !== id);
+    if (status.trackers.length === before) {
+      return sendJson(response, 404, { error: "Tracker not found" });
+    }
+    emitStatus();
+    return sendJson(response, 200, { ok: true });
   }
 
   if (request.method === "GET" && url.pathname === "/api/campaigns") {
@@ -393,6 +582,8 @@ function lanAddress() {
   }
   return host;
 }
+
+await loadTrackers();
 
 server.listen(port, host, () => {
   const lan = lanAddress();

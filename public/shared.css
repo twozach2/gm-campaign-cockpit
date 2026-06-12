@@ -1,0 +1,231 @@
+/* Components shared by the player screen and the DM preview. */
+
+.feed-entry {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  overflow: hidden;
+  max-width: min(960px, 100%);
+  width: 100%;
+  margin: 0 auto;
+  flex: 0 0 auto;
+}
+
+.feed-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(16, 13, 35, 0.6);
+  font-size: 0.75em;
+  color: var(--muted);
+}
+
+.feed-head .feed-icon {
+  color: var(--amber);
+}
+
+.feed-head .feed-title {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.feed-head .feed-time {
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.feed-body {
+  padding: 14px 18px;
+}
+
+.feed-body img,
+.feed-body table,
+.feed-body pre {
+  max-width: 100%;
+}
+
+.feed-body pre,
+.feed-body code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.feed-body.feed-text {
+  font-size: 1.15em;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  color: var(--text);
+}
+
+.feed-image {
+  display: block;
+  max-width: 100%;
+  max-height: 60vh;
+  object-fit: contain;
+  margin: 0 auto;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+.status-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: start;
+  justify-content: center;
+  gap: clamp(16px, 3vw, 36px);
+  padding: clamp(18px, 4vh, 40px) clamp(12px, 4vw, 48px);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.status-empty {
+  width: 100%;
+  text-align: center;
+  padding-top: 16vh;
+  color: var(--faint);
+}
+
+.tracker {
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  padding: 18px 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.tracker .tracker-name {
+  font-size: 0.95em;
+  color: var(--text);
+  text-align: center;
+  max-width: 240px;
+}
+
+.tracker-clock .clock-svg {
+  width: clamp(120px, 18vw, 190px);
+  height: auto;
+}
+
+.clock-seg {
+  fill: none;
+  stroke: var(--line-bright, #5c35b1);
+  stroke-width: 11;
+  stroke-linecap: butt;
+}
+
+.clock-seg.filled {
+  stroke: var(--amber);
+}
+
+.clock-count {
+  fill: var(--text);
+  font-size: 17px;
+  text-anchor: middle;
+  font-family: inherit;
+}
+
+.tracker-meter,
+.tracker-initiative {
+  min-width: min(420px, 80vw);
+}
+
+.tracker-meter .tracker-head,
+.tracker-initiative .tracker-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+}
+
+.tracker-meter .tracker-count,
+.tracker-initiative .tracker-count {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.tracker-initiative .tracker-count {
+  color: var(--amber-bright);
+}
+
+.meter-bar {
+  width: 100%;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: rgba(8, 6, 20, 0.6);
+  overflow: hidden;
+}
+
+.meter-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.35s ease, background 0.35s ease;
+}
+
+.init-list {
+  margin: 0;
+  padding: 0 0 0 1.5em;
+  width: 100%;
+  display: grid;
+  gap: 4px;
+}
+
+.init-entry {
+  padding: 4px 10px;
+  border-radius: 8px;
+  color: var(--muted);
+}
+
+.init-entry.current {
+  background: var(--amber-soft);
+  color: var(--text);
+  font-weight: 700;
+  box-shadow: inset 2px 0 0 var(--amber);
+}
+
+.init-empty {
+  color: var(--faint);
+  font-size: 0.9em;
+}
+
+/* Dice roll chat messages */
+.roll-result {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.roll-expr {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.roll-detail {
+  color: var(--muted);
+  font-size: 0.85em;
+  font-variant-numeric: tabular-nums;
+}
+
+.roll-total {
+  font-weight: 700;
+  font-size: 1.15em;
+  color: var(--amber-bright);
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-msg.secret {
+  border-style: dashed;
+  border-color: var(--amber);
+}
+
+.chat-msg.secret .chat-from {
+  color: var(--amber-bright);
+}
