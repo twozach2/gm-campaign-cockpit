@@ -1,6 +1,7 @@
 import { escapeHtml, feedEntryHtml, trackerHtml, rollHtml } from "/render.mjs";
 
 const NAME_KEY = "gm-cockpit:player-name";
+const SESSION_KEY = "gm-cockpit:player-session";
 
 const elements = {
   nav: document.querySelector("#player-nav"),
@@ -28,7 +29,12 @@ const elements = {
 
 let name = "";
 try { name = localStorage.getItem(NAME_KEY) || ""; } catch { name = ""; }
+let token = "";
+try { token = localStorage.getItem(SESSION_KEY) || ""; } catch { token = ""; }
+let player = null;
 let eventSource = null;
+let reconnectTimer = null;
+let connecting = false;
 const renderedIds = new Set();
 const feedNodes = new Map();
 let activeTab = "shared";
@@ -135,8 +141,10 @@ elements.lightbox.addEventListener("click", () => {
 
 function messageLabel(message) {
   if (message.scope !== "whisper") return escapeHtml(message.from || "Anon");
-  if (message.from === name) return "You whisper to the DM";
-  if (message.to === name && message.from === "DM") return "DM whispers to you";
+  if (message.fromPlayerId === player?.playerId) return "You whisper to the DM";
+  if (message.toPlayerId === player?.playerId && message.from === "DM") {
+    return "DM whispers to you";
+  }
   if (message.from === "DM") return `DM whispers to ${escapeHtml(message.to || "")}`;
   return `${escapeHtml(message.from || "Anon")} whispers to the DM`;
 }
@@ -155,58 +163,157 @@ function appendMessage(message) {
   bumpUnread("chat");
 }
 
-async function sync() {
-  try {
-    const res = await fetch(`/api/player/state?name=${encodeURIComponent(name)}`);
-    if (!res.ok) throw new Error(`Sync failed (${res.status})`);
-    const { presentation, chat, status } = await res.json();
-    syncing = true;
-    applyPresentation(presentation);
-    applyStatus(status);
-    elements.chatLog.innerHTML = "";
-    renderedIds.clear();
-    chat.forEach(appendMessage);
-    syncing = false;
-  } catch (error) {
-    syncing = false;
-    showToast(error.message);
+async function playerRequest(url, options = {}, authenticate = true) {
+  const headers = { ...(options.headers || {}) };
+  if (authenticate && token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(url, { ...options, headers });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const error = new Error(data.error || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
+  return data;
 }
 
-function connect() {
+function applyPlayer(nextPlayer) {
+  player = nextPlayer;
+  name = nextPlayer.displayName;
+  try {
+    localStorage.setItem(NAME_KEY, name);
+    if (token) localStorage.setItem(SESSION_KEY, token);
+  } catch {}
+  elements.identity.textContent = name;
+}
+
+function clearSession() {
+  token = "";
+  player = null;
+  try { localStorage.removeItem(SESSION_KEY); } catch {}
   if (eventSource) eventSource.close();
-  const es = new EventSource(`/api/stream?role=player&name=${encodeURIComponent(name)}`);
-  eventSource = es;
-  es.addEventListener("reveal-set", (e) => applyPresentation(JSON.parse(e.data)));
-  es.addEventListener("status-set", (e) => applyStatus(JSON.parse(e.data)));
-  es.addEventListener("chat", (e) => appendMessage(JSON.parse(e.data)));
-  es.addEventListener("whisper", (e) => appendMessage(JSON.parse(e.data)));
+  eventSource = null;
+  clearTimeout(reconnectTimer);
+}
+
+async function sync() {
+  const { player: currentPlayer, presentation, chat, status } =
+    await playerRequest("/api/player/state");
+  applyPlayer(currentPlayer);
+  syncing = true;
+  applyPresentation(presentation);
+  applyStatus(status);
+  elements.chatLog.innerHTML = "";
+  renderedIds.clear();
+  chat.forEach(appendMessage);
+  syncing = false;
+}
+
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    connect();
+  }, 1000);
+}
+
+async function connect() {
+  if (!token || connecting) return;
+  connecting = true;
+  if (eventSource) eventSource.close();
+  try {
+    const { ticket } = await playerRequest("/api/player/stream-ticket", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: "{}",
+    });
+    const es = new EventSource(
+      `/api/stream?ticket=${encodeURIComponent(ticket)}`,
+    );
+    eventSource = es;
+    es.addEventListener("hello", (event) => {
+      const data = JSON.parse(event.data);
+      if (data.player) applyPlayer(data.player);
+    });
+    es.addEventListener("reveal-set", (event) =>
+      applyPresentation(JSON.parse(event.data)),
+    );
+    es.addEventListener("status-set", (event) =>
+      applyStatus(JSON.parse(event.data)),
+    );
+    es.addEventListener("chat", (event) =>
+      appendMessage(JSON.parse(event.data)),
+    );
+    es.addEventListener("whisper", (event) =>
+      appendMessage(JSON.parse(event.data)),
+    );
+    es.onerror = () => {
+      if (eventSource !== es) return;
+      es.close();
+      eventSource = null;
+      scheduleReconnect();
+    };
+  } catch (error) {
+    if (error.status === 401) {
+      clearSession();
+      promptForName();
+    } else {
+      showToast(error.message);
+      scheduleReconnect();
+    }
+  } finally {
+    connecting = false;
+  }
 }
 
 async function sendChat(text) {
   if (!text.trim()) return;
   try {
-    const res = await fetch("/api/chat", {
+    await playerRequest("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ from: name, text, whisper: whisperMode }),
+      body: JSON.stringify({ text, whisper: whisperMode }),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Send failed (${res.status})`);
-    }
   } catch (error) {
+    if (error.status === 401) {
+      clearSession();
+      promptForName();
+    }
     showToast(error.message);
   }
 }
 
-function setName(value) {
-  name = value.trim().slice(0, 60);
-  try { localStorage.setItem(NAME_KEY, name); } catch {}
-  elements.identity.textContent = name || "Player";
-  elements.overlay.classList.add("hidden");
-  sync();
-  connect();
+async function setName(value) {
+  const displayName = value.trim().slice(0, 60);
+  try {
+    let data;
+    if (token) {
+      data = await playerRequest("/api/player/rename", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName }),
+      });
+    } else {
+      data = await playerRequest(
+        "/api/player/join",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ displayName }),
+        },
+        false,
+      );
+      token = data.token;
+    }
+    applyPlayer(data.player);
+    elements.overlay.classList.add("hidden");
+    await sync();
+    connect();
+  } catch (error) {
+    if (error.status === 401 && token) {
+      clearSession();
+      return setName(displayName);
+    }
+    showToast(error.message);
+  }
 }
 
 function promptForName() {
@@ -215,7 +322,7 @@ function promptForName() {
   elements.nameInput.focus();
 }
 
-elements.nameForm.addEventListener("submit", (event) => {
+elements.nameForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const value = elements.nameInput.value.trim();
   if (!value) return;
@@ -223,7 +330,7 @@ elements.nameForm.addEventListener("submit", (event) => {
     showToast("That name is reserved for the DM");
     return;
   }
-  setName(value);
+  await setName(value);
 });
 
 elements.rename.addEventListener("click", promptForName);
@@ -246,12 +353,21 @@ elements.chatForm.addEventListener("submit", (event) => {
   sendChat(text);
 });
 
-if (/^dm$/i.test(name.trim())) name = "";
-if (name) {
-  elements.identity.textContent = name;
-  elements.overlay.classList.add("hidden");
-  sync();
-  connect();
-} else {
-  promptForName();
+async function start() {
+  if (/^dm$/i.test(name.trim())) name = "";
+  if (!token) {
+    promptForName();
+    return;
+  }
+  try {
+    await sync();
+    elements.overlay.classList.add("hidden");
+    connect();
+  } catch (error) {
+    clearSession();
+    if (error.status !== 401) showToast(error.message);
+    promptForName();
+  }
 }
+
+start();

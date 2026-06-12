@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { randomInt } from "node:crypto";
 import { AtomicJsonStore } from "./lib/atomic-json-store.mjs";
+import { SessionRegistry } from "./lib/session-registry.mjs";
 import { Vault } from "./lib/vault.mjs";
 import {
   acknowledgeNoteOperation,
@@ -42,6 +43,7 @@ const presentation = {
 };
 const chat = [];
 const clients = new Set();
+const playerSessions = new SessionRegistry();
 let messageSeq = 0;
 let itemSeq = 0;
 
@@ -154,13 +156,20 @@ function visibleToClient(client, message) {
   if (message.scope === "table") return true;
   if (client.role === "dm") return true;
   if (message.scope === "secret") return false;
-  return client.role === "player" && (client.name === message.to || client.name === message.from);
+  return (
+    client.role === "player" &&
+    (client.playerId === message.toPlayerId ||
+      client.playerId === message.fromPlayerId)
+  );
 }
 
-function chatVisibleToPlayer(message, name) {
+function chatVisibleToPlayer(message, playerId) {
   if (message.scope === "table") return true;
   if (message.scope === "secret") return false;
-  return Boolean(name) && (message.to === name || message.from === name);
+  return (
+    Boolean(playerId) &&
+    (message.toPlayerId === playerId || message.fromPlayerId === playerId)
+  );
 }
 
 const RESERVED_NAME = /^dm$/i;
@@ -230,8 +239,14 @@ function pushChat(message) {
   return message;
 }
 
-function connectedPlayerNames() {
-  return [...new Set([...clients].filter((c) => c.role === "player" && c.name).map((c) => c.name))];
+function connectedPlayers() {
+  const players = new Map();
+  for (const client of clients) {
+    if (client.role !== "player" || !client.playerId) continue;
+    const player = playerSessions.get(client.playerId);
+    if (player) players.set(player.playerId, player);
+  }
+  return [...players.values()];
 }
 
 setInterval(() => {
@@ -251,7 +266,18 @@ function isDmAuthorized(request, url) {
   return Boolean(pin) && pin === TABLE_PIN;
 }
 
+function bearerToken(request) {
+  const authorization = request.headers.authorization || "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || "";
+}
+
+function requirePlayer(request) {
+  return playerSessions.require(bearerToken(request));
+}
+
 const DM_API = new Set([
+  "/api/dm/state",
   "/api/campaigns",
   "/api/sessions",
   "/api/session",
@@ -304,40 +330,110 @@ async function api(request, response, url) {
     return sendJson(response, 200, { ok: true, vaultRoot });
   }
 
-  if (request.method === "GET" && url.pathname === "/api/stream") {
-    const role = url.searchParams.get("role") === "dm" ? "dm" : "player";
-    if (role === "dm" && !isDmAuthorized(request, url)) {
-      return sendJson(response, 401, { error: "PIN required" });
+  if (request.method === "POST" && url.pathname === "/api/player/join") {
+    const body = await readJson(request);
+    return sendJson(
+      response,
+      200,
+      playerSessions.join(body.displayName),
+    );
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/player/rename") {
+    const body = await readJson(request);
+    const player = playerSessions.rename(
+      bearerToken(request),
+      body.displayName,
+    );
+    broadcast("presence", { players: connectedPlayers() });
+    return sendJson(response, 200, { player });
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/player/leave") {
+    const player = playerSessions.revoke(bearerToken(request));
+    for (const client of clients) {
+      if (client.role === "player" && client.playerId === player.playerId) {
+        client.response.end();
+        clients.delete(client);
+      }
     }
-    let name = (url.searchParams.get("name") || "").slice(0, 60);
-    if (role === "player" && RESERVED_NAME.test(name.trim())) name = "";
+    broadcast("presence", { players: connectedPlayers() });
+    return sendJson(response, 200, { ok: true });
+  }
+
+  if (
+    request.method === "POST" &&
+    url.pathname === "/api/player/stream-ticket"
+  ) {
+    return sendJson(
+      response,
+      200,
+      playerSessions.issueStreamTicket(bearerToken(request)),
+    );
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/stream") {
+    let client;
+    if (url.searchParams.get("role") === "dm") {
+      if (!isDmAuthorized(request, url)) {
+        return sendJson(response, 401, { error: "PIN required" });
+      }
+      client = { response, role: "dm" };
+    } else {
+      const player = playerSessions.consumeStreamTicket(
+        url.searchParams.get("ticket"),
+      );
+      if (!player) {
+        return sendJson(response, 401, {
+          error: "Invalid or expired stream ticket",
+        });
+      }
+      client = {
+        response,
+        role: "player",
+        playerId: player.playerId,
+      };
+    }
     response.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive",
     });
-    response.write(`event: hello\ndata: ${JSON.stringify({ role, name })}\n\n`);
-    const client = { response, role, name };
+    const hello =
+      client.role === "player"
+        ? { role: "player", player: playerSessions.get(client.playerId) }
+        : { role: "dm" };
+    response.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
     clients.add(client);
     writeEvent(client, "reveal-set", presentation);
-    writeEvent(client, "status-set", statusFor(role));
-    broadcast("presence", { players: connectedPlayerNames() });
+    writeEvent(client, "status-set", statusFor(client.role));
+    broadcast("presence", { players: connectedPlayers() });
     request.on("close", () => {
       clients.delete(client);
-      broadcast("presence", { players: connectedPlayerNames() });
+      broadcast("presence", { players: connectedPlayers() });
     });
     return;
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/state") {
-    let name = url.searchParams.get("name") || "";
-    const asDm = RESERVED_NAME.test(name.trim()) && isDmAuthorized(request, url);
-    if (asDm) {
-      return sendJson(response, 200, { presentation, chat, status: statusFor("dm") });
-    }
-    if (RESERVED_NAME.test(name.trim())) name = "";
-    const messages = chat.filter((m) => chatVisibleToPlayer(m, name));
-    return sendJson(response, 200, { presentation, chat: messages, status: statusFor("player") });
+    const player = requirePlayer(request);
+    const messages = chat.filter((message) =>
+      chatVisibleToPlayer(message, player.playerId),
+    );
+    return sendJson(response, 200, {
+      player,
+      presentation,
+      chat: messages,
+      status: statusFor("player"),
+    });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/dm/state") {
+    return sendJson(response, 200, {
+      presentation,
+      chat,
+      status: statusFor("dm"),
+    });
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/image") {
@@ -355,11 +451,18 @@ async function api(request, response, url) {
 
   if (request.method === "POST" && url.pathname === "/api/chat") {
     const body = await readJson(request);
-    let from = String(body.from || "Anon").trim().slice(0, 60) || "Anon";
     const text = String(body.text || "").slice(0, 2000);
     if (!text.trim()) return sendJson(response, 400, { error: "Empty message" });
-    const isDm = RESERVED_NAME.test(from) && isDmAuthorized(request, url);
-    if (!isDm && RESERVED_NAME.test(from)) from = "Anon";
+    const player = playerSessions.authenticate(bearerToken(request));
+    const isDm =
+      !player &&
+      RESERVED_NAME.test(String(body.from || "").trim()) &&
+      isDmAuthorized(request, url);
+    if (!player && !isDm) {
+      return sendJson(response, 401, { error: "Player session required" });
+    }
+    const from = isDm ? "DM" : player.displayName;
+    const identity = player ? { fromPlayerId: player.playerId } : {};
     const whisper = Boolean(body.whisper) && !isDm;
     const command = text.trim().match(/^\/(s?roll|r)(?:\s+(.*))?$/i);
     if (command) {
@@ -373,12 +476,19 @@ async function api(request, response, url) {
       }
       const roll = executeRoll(parts);
       const scope = secret ? "secret" : whisper ? "whisper" : "table";
-      const message = pushChat({ scope, from, ...(scope === "whisper" ? { to: "DM" } : {}), type: "roll", roll });
+      const message = pushChat({
+        scope,
+        from,
+        ...identity,
+        ...(scope === "whisper" ? { to: "DM" } : {}),
+        type: "roll",
+        roll,
+      });
       return sendJson(response, 200, { message });
     }
     const message = whisper
-      ? pushChat({ scope: "whisper", from, to: "DM", text })
-      : pushChat({ scope: "table", from, text });
+      ? pushChat({ scope: "whisper", from, ...identity, to: "DM", text })
+      : pushChat({ scope: "table", from, ...identity, text });
     return sendJson(response, 200, { message });
   }
 
@@ -454,10 +564,21 @@ async function api(request, response, url) {
 
   if (request.method === "POST" && url.pathname === "/api/whisper") {
     const body = await readJson(request);
-    const to = String(body.to || "").slice(0, 60);
+    const player = playerSessions.get(body.toPlayerId);
     const text = String(body.text || "").slice(0, 2000);
-    if (!to || !text.trim()) return sendJson(response, 400, { error: "to and text required" });
-    const message = pushChat({ scope: "whisper", from: "DM", to, text });
+    if (!player) {
+      return sendJson(response, 404, { error: "Player not found" });
+    }
+    if (!text.trim()) {
+      return sendJson(response, 400, { error: "Whisper text required" });
+    }
+    const message = pushChat({
+      scope: "whisper",
+      from: "DM",
+      to: player.displayName,
+      toPlayerId: player.playerId,
+      text,
+    });
     return sendJson(response, 200, { message });
   }
 

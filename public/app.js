@@ -701,13 +701,30 @@ function appendDmMessage(message) {
 
 function updatePlayers(players) {
   state.connectedPlayers = players || [];
+  const nameCounts = state.connectedPlayers.reduce((counts, player) => {
+    counts.set(
+      player.displayName,
+      (counts.get(player.displayName) || 0) + 1,
+    );
+    return counts;
+  }, new Map());
   if (elements.playerCount) {
     elements.playerCount.textContent = `${state.connectedPlayers.length} connected`;
   }
   if (elements.whisperTarget) {
     const current = elements.whisperTarget.value;
     elements.whisperTarget.innerHTML = state.connectedPlayers.length
-      ? state.connectedPlayers.map((name) => option(name, name, name === current)).join("")
+      ? state.connectedPlayers
+          .map((player) =>
+            option(
+              player.playerId,
+              nameCounts.get(player.displayName) > 1
+                ? `${player.displayName} · ${player.playerId.slice(0, 6)}`
+                : player.displayName,
+              player.playerId === current,
+            ),
+          )
+          .join("")
       : '<option value="">No players connected</option>';
   }
 }
@@ -916,7 +933,7 @@ elements.trackerForm?.addEventListener("submit", async (event) => {
 
 async function syncDmChat() {
   try {
-    const { presentation, chat } = await request(`/api/player/state?name=DM`);
+    const { presentation, chat } = await request("/api/dm/state");
     state.chatRendered.clear();
     if (elements.chatLogDm) elements.chatLogDm.innerHTML = "";
     chat.forEach(appendDmMessage);
@@ -978,14 +995,14 @@ elements.chatInputDm?.addEventListener("keydown", async (event) => {
 });
 
 elements.whisperSend?.addEventListener("click", async () => {
-  const to = elements.whisperTarget?.value || "";
+  const toPlayerId = elements.whisperTarget?.value || "";
   const text = elements.whisperText?.value || "";
-  if (!to || !text.trim()) {
+  if (!toPlayerId || !text.trim()) {
     showToast("Pick a player and type a whisper");
     return;
   }
   try {
-    await postJson("/api/whisper", { to, text });
+    await postJson("/api/whisper", { toPlayerId, text });
     elements.whisperText.value = "";
   } catch (error) {
     showToast(error.message);

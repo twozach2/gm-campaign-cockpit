@@ -1,58 +1,39 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { rm } from "node:fs/promises";
+import {
+  api as requestApi,
+  startTestServer,
+  stopTestServer,
+} from "../test-support/server.mjs";
 
-const appRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const port = 4900 + Math.floor(Math.random() * 1000);
-const base = `http://127.0.0.1:${port}`;
-let child;
-let tmpDir;
+let running;
+let base;
+let tavToken;
+let oloToken;
 
-async function api(method, pathname, body) {
-  const res = await fetch(base + pathname, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : undefined,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  return { status: res.status, data: await res.json() };
+function api(method, pathname, body, token) {
+  return requestApi(base, method, pathname, body, { token });
 }
 
 before(async () => {
-  tmpDir = await mkdtemp(path.join(os.tmpdir(), "gm-cockpit-status-"));
-  child = spawn(process.execPath, [path.join(appRoot, "server.mjs")], {
-    env: {
-      ...process.env,
-      PORT: String(port),
-      HOST: "127.0.0.1",
-      VAULT_ROOT: tmpDir,
-      TRACKERS_FILE: path.join(tmpDir, "trackers.json"),
-    },
-    stdio: "ignore",
+  running = await startTestServer(null, {
+    prefix: "gm-cockpit-status-",
   });
-  for (let i = 0; i < 50; i += 1) {
-    try {
-      const res = await fetch(`${base}/api/health`);
-      if (res.ok) return;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  throw new Error("Server did not start in time");
+  base = running.base;
+  tavToken = (
+    await api("POST", "/api/player/join", { displayName: "Tav" })
+  ).data.token;
+  oloToken = (
+    await api("POST", "/api/player/join", { displayName: "Olo" })
+  ).data.token;
 });
 
 after(async () => {
-  if (child && child.exitCode === null) {
-    const exited = once(child, "exit");
-    child.kill("SIGTERM");
-    await exited;
+  await stopTestServer(running?.child);
+  if (running?.root) {
+    await rm(running.root, { recursive: true, force: true });
   }
-  if (tmpDir) await rm(tmpDir, { recursive: true, force: true });
 });
 
 let clockId;
@@ -98,7 +79,7 @@ test("hidden trackers are filtered from the player state", async () => {
   meterId = created.data.tracker.id;
   await api("POST", "/api/status/upsert", { id: meterId, hidden: true });
 
-  const playerState = await api("GET", "/api/player/state?name=Tav");
+  const playerState = await api("GET", "/api/player/state", undefined, tavToken);
   const playerNames = playerState.data.status.trackers.map((t) => t.name);
   assert.deepEqual(playerNames, ["Pursuit"]);
 
@@ -108,7 +89,7 @@ test("hidden trackers are filtered from the player state", async () => {
 
 test("revealing a hidden tracker makes it visible to players", async () => {
   await api("POST", "/api/status/upsert", { id: meterId, hidden: false });
-  const playerState = await api("GET", "/api/player/state?name=Tav");
+  const playerState = await api("GET", "/api/player/state", undefined, tavToken);
   const playerNames = playerState.data.status.trackers.map((t) => t.name);
   assert.deepEqual(playerNames.sort(), ["Pursuit", "Quarantine"]);
 });
@@ -121,7 +102,12 @@ test("remove deletes a tracker and 404s on repeat", async () => {
 });
 
 test("/roll produces a server-side table roll", async () => {
-  const { status, data } = await api("POST", "/api/chat", { from: "Tav", text: "/roll 2d6+3" });
+  const { status, data } = await api(
+    "POST",
+    "/api/chat",
+    { text: "/roll 2d6+3" },
+    tavToken,
+  );
   assert.equal(status, 200);
   assert.equal(data.message.type, "roll");
   assert.equal(data.message.scope, "table");
@@ -135,52 +121,71 @@ test("/roll produces a server-side table roll", async () => {
 });
 
 test("/r alias and bare dN work; bad expressions are rejected", async () => {
-  const ok = await api("POST", "/api/chat", { from: "Tav", text: "/r d20" });
+  const ok = await api("POST", "/api/chat", { text: "/r d20" }, tavToken);
   assert.equal(ok.status, 200);
   assert.ok(ok.data.message.roll.total >= 1 && ok.data.message.roll.total <= 20);
-  const bad = await api("POST", "/api/chat", { from: "Tav", text: "/roll banana" });
+  const bad = await api(
+    "POST",
+    "/api/chat",
+    { text: "/roll banana" },
+    tavToken,
+  );
   assert.equal(bad.status, 400);
-  const noDice = await api("POST", "/api/chat", { from: "Tav", text: "/roll 5+3" });
+  const noDice = await api(
+    "POST",
+    "/api/chat",
+    { text: "/roll 5+3" },
+    tavToken,
+  );
   assert.equal(noDice.status, 400);
 });
 
 test("secret rolls are DM-only and hidden from players", async () => {
-  const denied = await api("POST", "/api/chat", { from: "Tav", text: "/sroll d20" });
+  const denied = await api(
+    "POST",
+    "/api/chat",
+    { text: "/sroll d20" },
+    tavToken,
+  );
   assert.equal(denied.status, 403);
 
   const { status, data } = await api("POST", "/api/chat", { from: "DM", text: "/sroll d20" });
   assert.equal(status, 200);
   assert.equal(data.message.scope, "secret");
 
-  const playerState = await api("GET", "/api/player/state?name=Tav");
+  const playerState = await api("GET", "/api/player/state", undefined, tavToken);
   assert.ok(!playerState.data.chat.some((m) => m.scope === "secret"));
 
-  const dmState = await api("GET", "/api/player/state?name=DM");
+  const dmState = await api("GET", "/api/dm/state");
   assert.ok(dmState.data.chat.some((m) => m.scope === "secret"));
 });
 
 test("player whispers reach the DM and the sender only", async () => {
   const { status, data } = await api("POST", "/api/chat", {
-    from: "Tav",
     text: "I pocket the gem",
     whisper: true,
-  });
+  }, tavToken);
   assert.equal(status, 200);
   assert.equal(data.message.scope, "whisper");
   assert.equal(data.message.to, "DM");
 
-  const sender = await api("GET", "/api/player/state?name=Tav");
+  const sender = await api("GET", "/api/player/state", undefined, tavToken);
   assert.ok(sender.data.chat.some((m) => m.scope === "whisper" && m.text === "I pocket the gem"));
 
-  const bystander = await api("GET", "/api/player/state?name=Olo");
+  const bystander = await api("GET", "/api/player/state", undefined, oloToken);
   assert.ok(!bystander.data.chat.some((m) => m.scope === "whisper"));
 
-  const dm = await api("GET", "/api/player/state?name=DM");
+  const dm = await api("GET", "/api/dm/state");
   assert.ok(dm.data.chat.some((m) => m.scope === "whisper" && m.from === "Tav"));
 });
 
 test("whispered rolls stay scoped to the DM", async () => {
-  const { data } = await api("POST", "/api/chat", { from: "Tav", text: "/roll d6", whisper: true });
+  const { data } = await api(
+    "POST",
+    "/api/chat",
+    { text: "/roll d6", whisper: true },
+    tavToken,
+  );
   assert.equal(data.message.scope, "whisper");
   assert.equal(data.message.to, "DM");
   assert.equal(data.message.type, "roll");
