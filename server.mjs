@@ -11,6 +11,11 @@ import {
   parseRouteQuery,
 } from "./lib/api-policy.mjs";
 import { DmAuth } from "./lib/dm-auth.mjs";
+import {
+  contentDisposition,
+  dmFileDisposition,
+  verifyPlayerImage,
+} from "./lib/file-policy.mjs";
 import { TokenBucketRateLimiter } from "./lib/rate-limit.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import { Vault } from "./lib/vault.mjs";
@@ -846,10 +851,13 @@ async function api(request, response, url) {
     );
     if (!item) return sendJson(response, 404, { error: "Image is not currently revealed" });
     const filePath = await vault.resolveFilePath(item.campaign, item.file);
+    const contentType = await verifyPlayerImage(filePath);
     const content = await readBoundedFile(filePath);
     response.writeHead(200, {
-      "Content-Type": mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream",
-      "Cache-Control": "no-cache",
+      "Content-Type": contentType,
+      "Content-Disposition": contentDisposition("inline", filePath),
+      "Cache-Control": "private, no-store",
+      "Content-Security-Policy": "sandbox; default-src 'none'",
     });
     return response.end(content);
   }
@@ -917,10 +925,13 @@ async function api(request, response, url) {
   if (request.method === "POST" && url.pathname === "/api/reveal/image") {
     const filePath = await vault.resolveFilePath(body.campaign, body.file);
     await assertBoundedFile(filePath);
+    await verifyPlayerImage(filePath);
+    const { folder } = await vault.campaignFolder(body.campaign);
+    const relativeFile = path.relative(folder, filePath).replaceAll(path.sep, "/");
     const basename = String(body.file).split("/").pop();
     const item = makeItem("image", {
       campaign: body.campaign,
-      file: body.file,
+      file: relativeFile,
       title: String(body.title || basename || "Image").slice(0, 120),
     });
     addPresentationItem(item);
@@ -1070,9 +1081,17 @@ async function api(request, response, url) {
       query.file,
     );
     const content = await readBoundedFile(filePath);
+    const disposition = dmFileDisposition(filePath);
+    const contentType =
+      disposition === "inline"
+        ? mimeTypes[path.extname(filePath).toLowerCase()] ||
+          "application/octet-stream"
+        : "application/octet-stream";
     response.writeHead(200, {
-      "Content-Type": mimeTypes[path.extname(filePath).toLowerCase()] || "application/octet-stream",
-      "Cache-Control": "no-cache",
+      "Content-Type": contentType,
+      "Content-Disposition": contentDisposition(disposition, filePath),
+      "Cache-Control": "private, no-store",
+      "Content-Security-Policy": "sandbox; default-src 'none'",
     });
     return response.end(content);
   }

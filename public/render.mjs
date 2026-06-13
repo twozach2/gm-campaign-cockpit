@@ -1,4 +1,4 @@
-export const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg)$/i;
+export const IMAGE_EXT = /\.(png|jpe?g|gif|webp)$/i;
 
 export function escapeHtml(value = "") {
   return String(value)
@@ -47,7 +47,7 @@ export function inlineMarkdown(value, fileUrl = (f) => f) {
     .replace(/_([^_]+)_/g, "<em>$1</em>")
     .replace(
       /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-      '<a href="$2" target="_blank" rel="noreferrer">$1</a>',
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>',
     );
 
   placeholders.forEach((html, index) => {

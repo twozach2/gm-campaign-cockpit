@@ -344,8 +344,9 @@ async function openReference(file, heading = "") {
     paintPushImageActiveState();
     return;
   }
-  if (/\.pdf$/i.test(file)) {
-    elements.referenceView.innerHTML = `<p><a class="wiki-link" href="${escapeHtml(fileUrl(file))}" target="_blank" rel="noreferrer">Open ${escapeHtml(file)} ↗</a></p>`;
+  if (!/\.md$/i.test(file)) {
+    const action = /\.pdf$/i.test(file) ? "Open" : "Download";
+    elements.referenceView.innerHTML = `<p><a class="wiki-link" href="${escapeHtml(fileUrl(file))}" target="_blank" rel="noopener noreferrer">${action} ${escapeHtml(file)} &#8599;</a></p>`;
     showReferenceView();
     return;
   }
