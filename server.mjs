@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import os from "node:os";
 import { createHash, randomInt } from "node:crypto";
 import { AtomicJsonStore } from "./lib/atomic-json-store.mjs";
+import { loadLocalEnvironment } from "./lib/config.mjs";
 import {
   apiRoute,
   parseRouteBody,
@@ -26,6 +27,7 @@ import { Vault } from "./lib/vault.mjs";
 import { acknowledgeNoteOperation } from "./lib/note-operation.mjs";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
+await loadLocalEnvironment(appRoot);
 const vaultRoot = path.resolve(process.env.VAULT_ROOT || path.join(appRoot, ".."));
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 4173);
@@ -163,7 +165,11 @@ const rateLimiter = new TokenBucketRateLimiter({
 let messageSeq = 0;
 let itemSeq = 0;
 
-const TRACKERS_FILE = process.env.TRACKERS_FILE || path.join(appRoot, "data", "trackers.json");
+const stateDir = path.resolve(
+  process.env.STATE_DIR || path.join(appRoot, "data"),
+);
+const TRACKERS_FILE =
+  process.env.TRACKERS_FILE || path.join(stateDir, "trackers.json");
 const status = {
   trackers: [],
   updatedAt: Date.now(),

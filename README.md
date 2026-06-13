@@ -1,255 +1,284 @@
 # GM Campaign Cockpit
 
-A local, dependency-free cockpit for running any tabletop campaign straight from
-your Markdown notes. Point it at a folder of campaigns and it gives you a
-session-by-session run-of-show, scene-by-scene navigation, inline maps and
-handouts, cross-linked references, and a live notes pane — all in the browser,
-all driven by plain files you already own.
+GM Campaign Cockpit runs tabletop campaigns directly from Markdown files. It
+provides session and scene navigation, references, notes, player reveals,
+trackers, chat, rolls, and whispers without moving campaign content into a
+database.
 
-It is **campaign-agnostic**: there is no database and no lock-in. Every campaign
-is just a folder of Markdown. The app reads your material in place and only ever
-writes inside a clearly fenced live-notes block (with timestamped backups), so
-your prep is never silently rewritten.
+This release is hardened for one computer or a trusted local network. It is not
+designed to be exposed directly to the public internet. Worldwide access needs
+a separate hosted relay and authentication boundary.
 
-- **Zero dependencies.** Pure Node.js built-ins — no `npm install` step.
-- **Your files stay yours.** Edit them in Obsidian, VS Code, anything. The
-  cockpit just reads them.
-- **Self-validating.** A built-in checker tells you exactly which headings or
-  links need fixing before you sit down to play.
+## Requirements
+
+- A current Node.js LTS release, version 20.12 or newer.
+- Campaign files stored locally or in a locally synchronized folder.
+- No `npm install` step is required.
 
 ## Quick Start
 
-You need [Node.js](https://nodejs.org/en/download) (LTS or newer). Then:
+Place the application folder beside your campaign folders:
+
+```text
+Dungeons_and_Dragons/
+|-- GM Campaign Cockpit/
+|-- Storm King's Thunder/
+|   |-- Director's Guide.md
+|   `-- Session Notes Workbook.md
+`-- The Sands of Aaru/
+    `-- Director's Guide.md
+```
+
+With that layout, the default vault is the folder above the application and no
+configuration is required.
+
+### Windows
+
+Run `Start GM Cockpit.ps1`.
+
+If PowerShell blocks local scripts, open PowerShell in the application folder
+and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File ".\Start GM Cockpit.ps1"
+```
+
+### macOS
+
+Double-click `Start GM Cockpit Mac.command`. If macOS removed its executable
+permission, run this once:
 
 ```bash
-git clone <this-repo> "GM Campaign Cockpit"
-cd "GM Campaign Cockpit"
-VAULT_ROOT="/path/to/your/campaigns" npm start
+chmod +x "/path/to/GM Campaign Cockpit/Start GM Cockpit Mac.command"
 ```
 
-Open <http://127.0.0.1:4173> and pick a campaign from the sidebar.
+### Terminal
 
-`VAULT_ROOT` is the folder that contains your campaign folders. If you omit it,
-the app uses the folder **one level above** the cockpit, so dropping this folder
-beside your campaigns works with no configuration. `HOST` and `PORT` can be
-overridden the same way.
-
-### Launchers
-
-- **macOS:** double-click `Start GM Cockpit Mac.command`. It pins `VAULT_ROOT`
-  and opens the browser for you. See `MAC SETUP.txt` for first-run notes. If a
-  sync client strips the executable bit, run
-  `chmod +x "Start GM Cockpit Mac.command"` once.
-- **Windows:** run `Start GM Cockpit.ps1`, or `node server.mjs` directly.
-
-## The File Contract
-
-Each campaign is a folder. The only hard requirement is a file named exactly
-`Director's Guide.md` — that file is what makes a folder show up as a campaign,
-and its name becomes the campaign's id in the dropdown.
-
-```
-your-campaigns/
-├── The Sands of Aaru/            ← a campaign (folder name = its id)
-│   ├── Director's Guide.md       ← REQUIRED: sessions & scenes are parsed here
-│   ├── Session Notes Workbook.md ← optional: created on first save
-│   ├── NPC — Tahir.md            ← any [[wiki-linked]] doc
-│   ├── Maps/overland.png         ← images/PDFs embed and open inline
-│   └── handout.pdf
-├── Storm King's Thunder/
-│   └── Director's Guide.md
-└── GM Campaign Cockpit/          ← the app itself; skipped automatically
+```bash
+npm start
 ```
 
-### Inside `Director's Guide.md`
+Open <http://127.0.0.1:4173>.
 
-**Sessions** are top-level headings (`#` to `###`). The number is required; the
-separator and title are optional:
+## Configuration
+
+Copy `.env.example` to `.env` and edit it. The app, validator, scaffolder, and
+launchers load `.env` automatically. Existing shell environment variables take
+precedence.
+
+Common settings:
+
+```text
+VAULT_ROOT=/absolute/path/to/the/folder/containing/campaigns
+HOST=127.0.0.1
+PORT=4173
+STATE_DIR=/absolute/path/to/runtime/state
+```
+
+If `VAULT_ROOT` is omitted, it defaults to the folder above the application.
+If `STATE_DIR` is omitted, runtime state uses the application-local `data`
+folder.
+
+## Local And LAN Modes
+
+### Local-only mode
+
+The default `HOST=127.0.0.1` accepts connections only from the same computer.
+The local browser receives a DM session automatically.
+
+### Trusted-LAN mode
+
+To let players and a DM browser on the same trusted network connect, set:
+
+```text
+HOST=0.0.0.0
+ALLOW_REMOTE_DM=true
+TABLE_PIN=choose-a-long-private-passphrase
+```
+
+`TABLE_PIN` is mandatory in LAN mode and must contain at least six characters.
+It is never printed to logs or placed in a URL. The DM enters it on the login
+screen. Players do not need it.
+
+Open the player screen at:
+
+```text
+http://<server-lan-address>:<port>/player.html
+```
+
+Do not port-forward this server, place it on an untrusted network, or expose it
+through a public reverse proxy. Phase One does not provide public accounts,
+TLS termination, hosted room isolation, or an internet relay.
+
+## Campaign File Contract
+
+Each campaign is a folder containing a file named exactly
+`Director's Guide.md`. That filename is the only hard requirement.
+
+```text
+Campaign Name/
+|-- Director's Guide.md
+|-- Session Notes Workbook.md
+|-- Player's Guide.md
+|-- NPC - Example.md
+|-- Maps/
+|   `-- overland.png
+`-- handout.pdf
+```
+
+Sessions are numbered headings:
 
 ```markdown
-# Session 1 — The Forge Below
-# Session 2: Into the Underdark
+# Session 12: The Forge Below
 ```
 
-**Scenes** live under a session and need both a `session.scene` number and a
-`:`/`—`/`-` separator before the title (`##` to `####`):
+Scenes live beneath a session and use a `session.scene` number:
 
 ```markdown
-## Scene 1.1: The Cell Block
-## Scene 1.2 — The Long Stair
+## Scene 12.1: The Cell Block
+## Scene 12.2: The Mark
 ```
 
-**Links and embeds** resolve to a file in the same campaign folder (`.md` is
-assumed if you omit an extension); `#Heading` jumps to that section:
+Wiki links resolve within the same campaign folder:
 
 ```markdown
-See [[NPC — Tahir]] and [[Location — Foundry#Prison]].
-![[Maps/overland.png]]      ← images and PDFs render/open inline
+See [[NPC - Example]] and [[Location - Foundry#Prison]].
+![[Maps/overland.png]]
 ```
 
-### The notes workbook
+Markdown documents render in the cockpit. PNG, JPEG, GIF, and WebP images may
+be previewed and explicitly revealed to players. PDFs open with restrictive
+headers. SVG, HTML, and other active file types are download-only and cannot be
+revealed on the player screen.
 
-Notes you type in the cockpit are written to `Session Notes Workbook.md`, inside
-a protected block — one per session — and nothing outside it is touched:
+## Session Notes
+
+The notes editor writes only inside the session's protected block in
+`Session Notes Workbook.md`:
 
 ```markdown
-<!-- gm-cockpit:session-1:start -->
-Live notes for session 1 go here.
-<!-- gm-cockpit:session-1:end -->
+<!-- gm-cockpit:session-12:start -->
+Live notes go here.
+<!-- gm-cockpit:session-12:end -->
 ```
 
-You never have to create this by hand. If the file or the block is missing, the
-first save creates it and writes a timestamped copy of any existing workbook to
-`data/backups/` (only the 25 most recent backups per campaign are kept).
+The editor provides write, split, and preview views. Saves are serialized and
+revision-aware, so typing during an active save cannot mark newer text as
+saved.
+
+Before changing an existing workbook, the app creates a timestamped backup. If
+the backup cannot be created, the workbook is left unchanged and the DM sees a
+save failure. The newest 25 backups per campaign are retained.
+
+## Player Screen
+
+Players open `/player.html`, choose a display name, and receive a private
+server-issued session. Display names are labels, not authentication identities,
+so duplicate names remain separate players.
+
+The DM can share:
+
+- Cards from `Player's Guide.md`
+- Verified raster images
+- Freeform text
+- Visible clocks, meters, and initiative trackers
+- Table chat, rolls, secret DM rolls, and private whispers
+
+Player file access is capability-based. A player can fetch only a currently
+revealed image by its server-created reveal ID; players cannot browse the vault
+or alter an ID to select another file.
+
+## Data Storage
+
+| Data | Location | Persistence |
+|---|---|---|
+| Campaign manuscripts and handouts | `VAULT_ROOT/<Campaign>/` | Existing files |
+| Session notes | Campaign `Session Notes Workbook.md` | Persistent |
+| Notes backups | Application `data/backups/<Campaign>/` | Newest 25 retained |
+| Tracker state | `STATE_DIR/trackers.json` | Persistent and atomic |
+| Presentation, chat, DM/player sessions | Server memory | Reset on restart |
+| Player name/session and DM layout | Browser local storage | Per browser |
+
+Tracker writes use a queued atomic replacement. If stored tracker JSON is
+malformed, it is renamed with a `.corrupt` suffix and the server starts with an
+empty tracker list. Failed tracker writes roll back the in-memory mutation.
+
+For a complete backup, preserve both `VAULT_ROOT` and `STATE_DIR`. The notes
+backup folder is under the application `data` folder unless the application
+itself is included in that backup.
+
+## Health And Recovery
+
+Two public, non-disclosing checks are available:
+
+- `GET /api/health` - process liveness
+- `GET /api/readiness` - vault and persistence readiness
+
+Neither endpoint returns filesystem paths. The launchers wait for readiness
+before opening the browser.
+
+The DM and player interfaces show `Connecting`, `Live`, `Reconnecting`, or
+`Offline`. Every stream connection and reconnect requests a fresh short-lived,
+single-use ticket.
+
+Shutdown waits for queued tracker and workbook writes. Operational logs are
+structured JSON and omit PINs, cookies, bearer tokens, CSRF tokens, session
+identifiers, whispers, notes, campaign contents, and filesystem paths.
+
+## Security Model
+
+- Static application assets contain no campaign data.
+- DM APIs require an opaque `HttpOnly; SameSite=Strict` cookie.
+- Player APIs require a server-issued bearer session.
+- State-changing requests require same-origin JSON.
+- DM writes also require a session-bound CSRF token.
+- API roles, methods, schemas, and body limits are declared centrally.
+- Rate limits and bounded registries protect public and authenticated routes.
+- Vault paths are checked lexically and by real path to block traversal and
+  symlink escapes.
+- Player reveals accept only signature-verified PNG, JPEG, GIF, or WebP files.
+- Active content is served as a sandboxed download rather than inline.
+- Internal server failures return generic responses without filesystem paths.
+
+These controls reduce risk on a trusted LAN. They do not replace TLS, public
+identity, tenant isolation, a cloud database, or an internet-facing gateway.
 
 ## Validation
 
-Before a session, check that your files parse the way the cockpit expects.
-
-**From the terminal:**
+Run the document validator:
 
 ```bash
-VAULT_ROOT="/path/to/your/campaigns" npm run check
+npm run check
 ```
 
-This prints a per-campaign `✓ / ⚠ / ✗` report with session/scene/link counts and
-exits non-zero if any campaign has errors — handy in a pre-game script or CI.
-
-**In the app:** click **Check documents** in the sidebar for the same report in a
-modal. The button also carries a badge showing the issue count for the active
-campaign, refreshed whenever you switch sessions.
-
-The checker reports:
-
-- **Errors** (block parsing): no `Director's Guide.md`, or no parseable
-  `# Session N` headings.
-- **Warnings** (likely mistakes): duplicate session numbers, `Scene N.M`
-  headings that won't parse (missing separator, wrong session number, or wrong
-  heading level), and `[[links]]`/`![[embeds]]` whose target file is missing or
-  points outside the campaign folder.
-- **Info**: sessions with no scenes (shown brief-only) and whether a workbook
-  exists yet.
-
-## Player Facing Interface
-
-The cockpit can drive a shared player screen on a TV, tablet, or any browser on
-your local network. The DM pushes content one card/image/text at a time;
-players never browse the campaign vault themselves.
-
-**Start it:**
+You may also pass a vault path directly:
 
 ```bash
-HOST=0.0.0.0 ALLOW_REMOTE_DM=true TABLE_PIN=123456 \
-  VAULT_ROOT="/path/to/your/campaigns" npm start
+node validate.mjs "/path/to/campaigns"
 ```
 
-The default `HOST=127.0.0.1` only accepts loopback connections. Setting
-`HOST=0.0.0.0` lets LAN devices reach the server. The server prints the LAN URL
-and the table PIN on startup:
+The validator reports session, scene, and link counts; malformed headings;
+duplicate session numbers; broken links; and files that point outside the
+campaign folder.
 
-```
-GM Campaign Cockpit (DM): http://0.0.0.0:4173
-Player screen (LAN):      http://192.168.1.42:4173/player.html
-Table PIN (remote DM login): 732184
-```
+## New Campaign
 
-Remote binding now requires an explicit opt-in and a six-character-or-longer
-PIN:
+Create a campaign from the templates:
 
 ```bash
-HOST=0.0.0.0 ALLOW_REMOTE_DM=true TABLE_PIN=123456 npm start
+npm run new-campaign -- "My New Campaign"
 ```
 
-The DM enters that PIN in the cockpit login screen. The server exchanges it for
-an opaque `HttpOnly` browser session; neither the PIN nor the session token is
-placed in a URL.
+The command uses `VAULT_ROOT` and creates a Director's Guide, notes workbook,
+Player's Guide, and example handout.
 
-**What players see.** Each device opens `http://<lan-ip>:<port>/player.html`,
-types a name once (stored in `localStorage`), and lands on a holding screen
-until the DM shares something. Shared content replaces the previous screen.
-
-**What the DM pushes.** A "Player Screen" panel appears in the cockpit's right
-rail with one button per `## Card` heading in the campaign's `Player's Guide.md`,
-a free-text composer, a Clear button, a shared table chat, and a whisper
-composer (DM → one named player). A list of connected players keeps the
-whisper-target dropdown in sync.
-
-**Authoring `Player's Guide.md`.** Cards live in a file beside
-`Director's Guide.md`:
-
-```markdown
-# Player's Guide
-Optional intro paragraph the whole table can read.
-
-## Welcome
-Pushable card. The card heading and body get rendered on the player screen.
-
-## Your Character
-Another card.
-```
-
-Player-facing image reveals use the separate "push image" control; embedding
-`![[image]]` inside a player card won't resolve on player devices.
-
-**Security model.**
-
-- Static HTML, JavaScript, and CSS may be loaded without authentication, but
-  they contain no campaign data.
-- Player APIs require a server-issued bearer session. Display names are labels,
-  not identities, and one-time tickets authenticate player event streams.
-- DM APIs require an opaque `HttpOnly; SameSite=Strict` session cookie.
-- Localhost receives a DM session automatically. Remote LAN browsers log in
-  through `POST /api/dm/login`; the PIN is never accepted in a query string.
-- State-changing requests require same-origin JSON. DM writes also carry a
-  session-bound CSRF token that is never stored in the cookie.
-- `ALLOWED_ORIGINS` may contain a comma-separated list of additional trusted
-  browser origins when a custom LAN hostname is required.
-- API methods, roles, query parameters, body fields, and body-size limits are
-  declared in one route policy; invalid or unknown input is rejected before a
-  handler changes state.
-- Login, join, chat, ticket, stream, mutation, and file requests have bounded
-  in-memory rate limits. Excess requests return `429` with `Retry-After`.
-- DM event streams use a short-lived, single-use ticket rather than exposing
-  the session cookie or PIN in the URL.
-
-Presentation state, player sessions, DM sessions, and chat live in memory and
-reset on every server restart. Default capacity limits are documented in
-`.env.example` and can be raised for an unusually large trusted-LAN table.
-
-## Templates & starting a new campaign
-
-The `templates/` folder ships skeleton files that already satisfy the cockpit's
-file contract. Two ways to use them:
-
-**One-shot command (recommended):**
+## Development Checks
 
 ```bash
-VAULT_ROOT="/path/to/your/campaigns" npm run new-campaign -- "My New Campaign"
+npm test
+npm run check
 ```
 
-This creates `VAULT_ROOT/My New Campaign/` containing a Director's Guide,
-Session Notes Workbook, Player's Guide, and a sample handout — all with the
-campaign name substituted into the frontmatter. A freshly scaffolded campaign
-passes `npm run check` with 0 errors and 0 warnings.
-
-**Manual copy:** copy any subset of files from `templates/` into a new
-`VAULT_ROOT/<Campaign>/` folder and replace `__CAMPAIGN_NAME__` with your
-campaign name. Only `Director's Guide.md` is strictly required.
-
-The `templates/` directory lives in the app/repo root — not in your vault — so
-it never shows up as a campaign in the dropdown or in `npm run check`.
-
-## How It Works
-
-- `server.mjs` — a tiny HTTP server (Node `http`) serving the `public/` UI and a
-  small JSON API (`/api/campaigns`, `/api/sessions`, `/api/documents`,
-  `/api/file`, `/api/validate`, notes read/write, the player reveal/chat API
-  and SSE stream).
-- `lib/vault.mjs` — all file parsing: session/scene extraction, wiki-link
-  resolution, protected-block notes writing with backups, Player's Guide card
-  parsing, and validation.
-- `validate.mjs` — the standalone CLI behind `npm run check`.
-- `scaffold.mjs` — the CLI behind `npm run new-campaign`.
-- `public/` — the vanilla HTML/CSS/JS front end (DM cockpit + player screen).
-
-Run the test suite with `npm test`.
+The automated suite covers saves, persistence, authentication, authorization,
+origin and CSRF checks, player identity, rate limits, resource bounds, file
+exposure, recovery, logging, and configuration.

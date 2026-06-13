@@ -1,8 +1,10 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadLocalEnvironment } from "./lib/config.mjs";
 import { Vault } from "./lib/vault.mjs";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
+await loadLocalEnvironment(appRoot);
 const argRoot = process.argv[2];
 const vaultRoot = path.resolve(argRoot || process.env.VAULT_ROOT || path.join(appRoot, ".."));
 const vault = new Vault({ root: vaultRoot, appRoot });

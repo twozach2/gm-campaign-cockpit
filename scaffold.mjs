@@ -1,8 +1,10 @@
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { loadLocalEnvironment } from "./lib/config.mjs";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
+await loadLocalEnvironment(appRoot);
 const TEMPLATES_DIR = path.join(appRoot, "templates");
 
 function resolveVaultRoot() {

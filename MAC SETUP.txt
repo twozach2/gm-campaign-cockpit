@@ -1,29 +1,28 @@
 GM CAMPAIGN COCKPIT - MAC FIRST RUN
 
-1. Install the LTS version of Node.js from:
+1. Install a current Node.js LTS release from:
    https://nodejs.org/en/download
 
-2. Keep the "GM Campaign Cockpit" folder beside your campaign folders:
+2. Keep the application beside your campaign folders, or copy
+   ".env.example" to ".env" and set VAULT_ROOT.
 
-   Dungeons_and_Dragons/
-     GM Campaign Cockpit/
-     Storm King's Thunder/
-     The Sands of Aaru/
-     The Silence Between Stars/
+3. Double-click "Start GM Cockpit Mac.command".
 
-3. Try double-clicking "Start GM Cockpit Mac.command".
-
-4. If macOS says the file cannot be executed, open Terminal and run:
+4. If macOS says the launcher cannot be executed, open Terminal and run:
 
    chmod +x "/path/to/GM Campaign Cockpit/Start GM Cockpit Mac.command"
 
-   Tip: type "chmod +x " and then drag the launcher into the Terminal window.
-   Press Return, then double-click the launcher again.
+   You can type "chmod +x " and drag the launcher into Terminal.
 
 5. Keep the launcher Terminal window open while using the cockpit.
+   Press Control-C when the session is finished.
 
-The browser opens to:
+The local DM interface opens at:
 http://127.0.0.1:4173
 
-Notes still save directly into the selected campaign's
-"Session Notes Workbook.md". A backup is created before every save.
+For trusted-LAN play, configure HOST, ALLOW_REMOTE_DM, and TABLE_PIN in .env.
+Do not expose the server directly to the public internet.
+
+Notes save to the selected campaign's "Session Notes Workbook.md". Existing
+workbooks are backed up before a save; if the backup fails, the workbook is not
+changed.
