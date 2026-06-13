@@ -62,6 +62,20 @@ button.quiet {
   font-weight: 600;
 }
 
+.quiet-link {
+  padding: 7px 10px;
+  color: var(--text);
+  border: 1px solid var(--line-bright);
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.quiet-link:hover {
+  border-color: var(--gold);
+}
+
 button.danger-button {
   color: var(--red);
   border-color: rgba(255, 120, 150, 0.45);

@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Player Table - GM Campaign Cockpit</title>
+    <link rel="stylesheet" href="/player/shared.css">
+    <link rel="stylesheet" href="/player/player.css">
+  </head>
+  <body>
+    <main class="player-shell">
+      <nav id="player-nav" class="player-nav" aria-label="Player screen tabs">
+        <button class="player-nav-tab active" type="button" data-tab="shared">Shared<span class="tab-badge hidden" data-badge="shared"></span></button>
+        <button class="player-nav-tab" type="button" data-tab="chat">Chat<span class="tab-badge hidden" data-badge="chat"></span></button>
+        <button class="player-nav-tab" type="button" data-tab="status">Status<span class="tab-badge hidden" data-badge="status"></span></button>
+        <div class="player-nav-spacer"></div>
+        <span id="presence" class="presence">0 online</span>
+        <span id="player-connection" class="connection-state" data-state="connecting" aria-live="polite">Connecting</span>
+        <strong id="player-identity" class="player-nav-identity">Player</strong>
+        <button id="player-rename" type="button" class="ghost-button-sm">Change name</button>
+        <button id="player-leave" type="button" class="ghost-button-sm danger">Leave</button>
+      </nav>
+
+      <section id="panel-shared" class="player-panel active" aria-label="Shared content">
+        <div id="feed" class="player-feed">
+          <div id="holding" class="player-holding">
+            <div class="player-holding-inner">
+              <div class="player-mark">PL</div>
+              <h1>At The Table</h1>
+              <p>Waiting for the DM to share something...</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="panel-chat" class="player-panel player-chat" aria-label="Table chat">
+        <div id="chat-log" class="player-chat-log"></div>
+        <form id="chat-form" class="player-chat-form">
+          <button id="whisper-toggle" type="button" class="whisper-toggle" title="Whisper to the DM" aria-pressed="false">Whisper</button>
+          <input id="chat-input" type="text" placeholder="Message the table... (/roll 2d6+3)" maxlength="2000" autocomplete="off">
+          <button type="submit">Send</button>
+        </form>
+      </section>
+
+      <section id="panel-status" class="player-panel" aria-label="Status trackers">
+        <div id="status-list" class="status-list"></div>
+      </section>
+    </main>
+
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-label="Enlarged image">
+      <img id="lightbox-img" alt="">
+    </div>
+
+    <div id="join-overlay" class="join-overlay">
+      <form id="join-form" class="join-card">
+        <span class="eyebrow">Remote player access</span>
+        <h1>Join the table</h1>
+        <p>Enter the private invite from your DM. Your session is valid only for this room.</p>
+        <label>
+          <span>Invite code</span>
+          <input id="invite-token" maxlength="512" autocomplete="off" required>
+        </label>
+        <label>
+          <span>Name at the table</span>
+          <input id="display-name" maxlength="60" autocomplete="nickname" required>
+        </label>
+        <p id="join-error" class="error" role="alert"></p>
+        <button type="submit">Join campaign</button>
+      </form>
+    </div>
+
+    <div id="rename-overlay" class="join-overlay hidden">
+      <form id="rename-form" class="join-card">
+        <span class="eyebrow">Player identity</span>
+        <h2>Change your name</h2>
+        <label>
+          <span>Display name</span>
+          <input id="rename-name" maxlength="60" autocomplete="nickname" required>
+        </label>
+        <div class="form-actions">
+          <button type="submit">Save name</button>
+          <button id="rename-cancel" class="quiet" type="button">Cancel</button>
+        </div>
+      </form>
+    </div>
+
+    <div id="player-toast" class="toast hidden" role="status" aria-live="polite"></div>
+    <script type="module" src="/player/player.js"></script>
+  </body>
+</html>

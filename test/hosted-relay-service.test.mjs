@@ -22,6 +22,16 @@ const silentLogger = {
   error() {},
 };
 
+async function waitFor(check, timeoutMs = 1_000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for hosted relay state");
+}
+
 async function startRelay(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "gm-hosted-relay-"));
   const store = new RelayStore({
@@ -143,6 +153,17 @@ test("hosted relay exposes bounded health, readiness, and player session routes"
   const script = await fetch(`${relay.baseUrl}/admin.js`);
   assert.equal(script.status, 200);
   assert.match(script.headers.get("content-type"), /javascript/);
+  const playerPage = await fetch(`${relay.baseUrl}/player/`);
+  assert.equal(playerPage.status, 200);
+  assert.match(await playerPage.text(), /Join the table/);
+  const playerScript = await fetch(`${relay.baseUrl}/player/player.js`);
+  assert.equal(playerScript.status, 200);
+  const playerScriptSource = await playerScript.text();
+  assert.match(playerScriptSource, /gm-campaign-cockpit-player-v1/);
+  assert.doesNotMatch(playerScriptSource, /\?token=|searchParams.*token/i);
+  const renderer = await fetch(`${relay.baseUrl}/player/render.mjs`);
+  assert.equal(renderer.status, 200);
+  assert.match(await renderer.text(), /export function escapeHtml/);
 
   const health = await fetch(`${relay.baseUrl}/health`);
   assert.equal(health.status, 200);
@@ -282,6 +303,54 @@ test("agent and player WebSockets exchange authenticated room commands and event
   assert.equal(result.id, "player-command-1");
   assert.equal(result.payload.accepted, true);
   assert.equal(relay.store.roomState(roomId).revision, 1);
+
+  player.sendJson({
+    protocol: PLAYER_PROTOCOL_NAME,
+    version: PLAYER_PROTOCOL_VERSION,
+    id: "player-heartbeat-1",
+    type: "heartbeat",
+    roomId,
+    sentAt: Date.now(),
+    payload: { nonce: "heartbeat-response" },
+  });
+  await player.expectNoJson((message) => message.type === "heartbeat");
+
+  player.close();
+  agent.sendJson(
+    agentMessage(
+      "room.event",
+      {
+        revision: 2,
+        eventType: "presence.set",
+        audience: { kind: "all" },
+        data: {
+          players: [
+            {
+              playerId: joined.membership.playerId,
+              displayName: "Aria",
+            },
+          ],
+        },
+      },
+      roomId,
+    ),
+  );
+  await waitFor(() => relay.store.roomState(roomId).revision === 2);
+  const reconnected = relay.track(
+    await connectWebSocket({
+      port: relay.port,
+      pathname: `/v1/player/${encodeURIComponent(roomId)}`,
+      protocols: [
+        "gm-campaign-cockpit-player-v1",
+        `auth.${joined.token}`,
+      ],
+    }),
+  );
+  const resumed = await reconnected.nextJson(
+    (message) => message.type === "snapshot",
+  );
+  assert.equal(resumed.payload.revision, 2);
+  assert.equal(resumed.payload.state.players[0].displayName, "Aria");
 });
 
 test("WebSocket authorization and fanout remain isolated by room", async (t) => {
@@ -579,4 +648,120 @@ test("admin login rejects cross-origin requests and supports logout", async (t) 
     cookie: admin.cookie,
   });
   assert.equal(expired.response.status, 401);
+});
+
+test("same-name remote players keep distinct room identities", async (t) => {
+  const relay = await startRelay(t);
+  const created = await bootstrap(relay.store);
+  const first = await redeem(relay.baseUrl, created.invite.token, "Echo");
+  const second = await redeem(relay.baseUrl, created.invite.token, "Echo");
+  assert.notEqual(first.membership.id, second.membership.id);
+  assert.notEqual(first.membership.playerId, second.membership.playerId);
+  assert.notEqual(first.token, second.token);
+  assert.equal(
+    relay.store.memberships(created.room.id).filter(
+      (membership) => membership.displayName === "Echo",
+    ).length,
+    2,
+  );
+});
+
+test("remote rename and leave commands update and revoke the room membership", async (t) => {
+  const relay = await startRelay(t);
+  const created = await bootstrap(relay.store);
+  const joined = await redeem(relay.baseUrl, created.invite.token, "Aria");
+  const roomId = created.room.id;
+
+  const agent = relay.track(
+    await connectWebSocket({
+      port: relay.port,
+      pathname: `/v1/agent/${encodeURIComponent(roomId)}`,
+      protocols: [
+        "gm-campaign-cockpit-v1",
+        `auth.${created.device.token}`,
+      ],
+    }),
+  );
+  agent.sendJson(
+    agentMessage("agent.hello", {
+      agentId: created.device.device.id,
+      appVersion: "0.1.0",
+      capabilities: [],
+    }),
+  );
+  await agent.nextJson((message) => message.type === "relay.hello");
+  await agent.nextJson((message) => message.type === "room.membership");
+
+  const player = relay.track(
+    await connectWebSocket({
+      port: relay.port,
+      pathname: `/v1/player/${encodeURIComponent(roomId)}`,
+      protocols: [
+        "gm-campaign-cockpit-player-v1",
+        `auth.${joined.token}`,
+      ],
+    }),
+  );
+  await player.nextJson((message) => message.type === "snapshot");
+
+  player.sendJson(
+    playerCommand(roomId, "rename-1", "player.rename", {
+      displayName: "Nova",
+    }),
+  );
+  const rename = await agent.nextJson(
+    (message) =>
+      message.type === "room.command" &&
+      message.payload.commandType === "player.rename",
+  );
+  agent.sendJson(
+    agentMessage(
+      "room.command-result",
+      {
+        commandId: rename.payload.commandId,
+        accepted: true,
+      },
+      roomId,
+    ),
+  );
+  const renameResult = await player.nextJson(
+    (message) => message.type === "command-result" && message.id === "rename-1",
+  );
+  assert.equal(renameResult.payload.accepted, true);
+  assert.equal(relay.store.memberships(roomId)[0].displayName, "Nova");
+  const renamedMembership = await agent.nextJson(
+    (message) =>
+      message.type === "room.membership" &&
+      message.payload.players[0]?.displayName === "Nova",
+  );
+  assert.equal(renamedMembership.payload.players[0].playerId, joined.membership.playerId);
+
+  player.sendJson(playerCommand(roomId, "leave-1", "player.leave", {}));
+  const leave = await agent.nextJson(
+    (message) =>
+      message.type === "room.command" &&
+      message.payload.commandType === "player.leave",
+  );
+  const leaveResultPromise = player.nextJson(
+    (message) => message.type === "command-result" && message.id === "leave-1",
+  );
+  agent.sendJson(
+    agentMessage(
+      "room.command-result",
+      {
+        commandId: leave.payload.commandId,
+        accepted: true,
+      },
+      roomId,
+    ),
+  );
+  const leaveResult = await leaveResultPromise;
+  assert.equal(leaveResult.payload.accepted, true);
+  assert.equal(relay.store.authenticateMembership(joined.token), null);
+  const leftMembership = await agent.nextJson(
+    (message) =>
+      message.type === "room.membership" &&
+      message.payload.players.length === 0,
+  );
+  assert.deepEqual(leftMembership.payload.players, []);
 });

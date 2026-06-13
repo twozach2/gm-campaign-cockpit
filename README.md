@@ -275,6 +275,16 @@ The account dashboard can generate one-time device pairing codes, list and
 revoke devices, create and end rooms, open or close joins, rotate invites, and
 remove players.
 
+Remote players open `https://relay.example.com/player/`, enter the current
+invite capability, and choose a display name. The browser receives a
+room-scoped session and reconnects through the hosted player WebSocket. The
+remote screen supports text and card reveals, visible trackers, table chat,
+dice rolls, whispers with the DM, player presence, rename, leave, and snapshot
+recovery. Duplicate display names remain separate identities.
+
+Hosted image reveals remain disabled until the opaque asset service in
+P2-WP6 is implemented. Local and LAN image reveals continue to work normally.
+
 For the normal pairing flow, configure only the relay's public control origin
 in the local cockpit:
 
@@ -318,16 +328,16 @@ Available service boundaries:
 - `GET /health` and `GET /readiness`
 - `POST /v1/invites/redeem`
 - `GET /v1/player/session`
+- Hosted player interface at `/player/`
 - Account-session and room-control routes under `/v1/admin/`
 - `POST /v1/devices/pair` and `GET /v1/device/state`
 - `WS /v1/agent/<room-id>`
 - `WS /v1/player/<room-id>`
 
 There is no production hosted relay bundled with this repository yet. Before
-public use, this skeleton still needs a remote player UI, an asset service, a
-production database and backups, stronger deployment limits, monitoring, and a
-dedicated security review. Local and trusted-LAN modes remain the supported
-ways to run a session.
+public use, this skeleton still needs an asset service, a production database
+and backups, stronger deployment limits, monitoring, and a dedicated security
+review. Local and trusted-LAN modes remain the supported ways to run a session.
 
 ## Validation
 

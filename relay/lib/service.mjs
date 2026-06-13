@@ -35,6 +35,7 @@ const defaultPublicRoot = path.resolve(
   "..",
   "public",
 );
+const defaultAppPublicRoot = path.resolve(defaultPublicRoot, "..", "..", "public");
 
 function identifier(prefix) {
   return `${prefix}_${randomBytes(18).toString("base64url")}`;
@@ -179,9 +180,15 @@ function securityHeaders(response) {
 }
 
 const staticFiles = new Map([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/admin.js", ["admin.js", "text/javascript; charset=utf-8"]],
-  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+  ["/", ["relay", "index.html", "text/html; charset=utf-8"]],
+  ["/admin.js", ["relay", "admin.js", "text/javascript; charset=utf-8"]],
+  ["/styles.css", ["relay", "styles.css", "text/css; charset=utf-8"]],
+  ["/player", ["relay", "player.html", "text/html; charset=utf-8"]],
+  ["/player/", ["relay", "player.html", "text/html; charset=utf-8"]],
+  ["/player/player.js", ["relay", "player.js", "text/javascript; charset=utf-8"]],
+  ["/player/player.css", ["relay", "player.css", "text/css; charset=utf-8"]],
+  ["/player/render.mjs", ["app", "render.mjs", "text/javascript; charset=utf-8"]],
+  ["/player/shared.css", ["app", "shared.css", "text/css; charset=utf-8"]],
 ]);
 
 function accountCookie(token, secure) {
@@ -223,6 +230,7 @@ export class HostedRelayService {
     publicOrigin,
     accountAuth,
     publicRoot = defaultPublicRoot,
+    appPublicRoot = defaultAppPublicRoot,
     now = () => Date.now(),
     randomId = identifier,
   }) {
@@ -244,6 +252,7 @@ export class HostedRelayService {
         now,
       });
     this.publicRoot = path.resolve(publicRoot);
+    this.appPublicRoot = path.resolve(appPublicRoot);
     this.ready = false;
     this.server = null;
     this.agents = new Map();
@@ -595,8 +604,9 @@ export class HostedRelayService {
   }
 
   async serveStatic(response, pathname) {
-    const [filename, contentType] = staticFiles.get(pathname);
-    const content = await readFile(path.join(this.publicRoot, filename));
+    const [source, filename, contentType] = staticFiles.get(pathname);
+    const root = source === "app" ? this.appPublicRoot : this.publicRoot;
+    const content = await readFile(path.join(root, filename));
     response.setHeader(
       "Content-Security-Policy",
       "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
@@ -812,9 +822,6 @@ export class HostedRelayService {
       throw requestError("Agent hello is required", 400, "HELLO_REQUIRED");
     }
     if (message.type === "heartbeat") {
-      this.sendAgent(session, "heartbeat", {
-        nonce: message.payload.nonce,
-      });
       return;
     }
     if (message.type === "room.snapshot") {
@@ -926,9 +933,6 @@ export class HostedRelayService {
       throw requestError("Player message belongs to another room", 403, "ROOM_FORBIDDEN");
     }
     if (message.type === "heartbeat") {
-      this.sendPlayer(session, "heartbeat", {
-        nonce: message.payload.nonce,
-      });
       return;
     }
     const receiptKey = `${session.membership.id}:${message.id}`;
