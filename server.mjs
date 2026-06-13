@@ -23,6 +23,10 @@ import {
 } from "./lib/logger.mjs";
 import { TokenBucketRateLimiter } from "./lib/rate-limit.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
+import {
+  messageVisibleToAudience,
+  trackerStateForAudience,
+} from "./lib/room-projection.mjs";
 import { Vault } from "./lib/vault.mjs";
 import { acknowledgeNoteOperation } from "./lib/note-operation.mjs";
 
@@ -255,8 +259,7 @@ async function loadTrackers() {
 }
 
 function statusFor(role) {
-  if (role === "dm") return status;
-  return { trackers: status.trackers.filter((t) => !t.hidden), updatedAt: status.updatedAt };
+  return trackerStateForAudience(status, { role });
 }
 
 async function emitStatus() {
@@ -298,23 +301,11 @@ function writeEvent(client, eventName, payload) {
 }
 
 function visibleToClient(client, message) {
-  if (message.scope === "table") return true;
-  if (client.role === "dm") return true;
-  if (message.scope === "secret") return false;
-  return (
-    client.role === "player" &&
-    (client.playerId === message.toPlayerId ||
-      client.playerId === message.fromPlayerId)
-  );
+  return messageVisibleToAudience(message, client);
 }
 
 function chatVisibleToPlayer(message, playerId) {
-  if (message.scope === "table") return true;
-  if (message.scope === "secret") return false;
-  return (
-    Boolean(playerId) &&
-    (message.toPlayerId === playerId || message.fromPlayerId === playerId)
-  );
+  return messageVisibleToAudience(message, { role: "player", playerId });
 }
 
 const MAX_ROLL_TERMS = 10;
