@@ -89,6 +89,11 @@ test("portable configuration files contain no personal machine paths", async () 
   );
   assert.equal(packageData.scripts.session, undefined);
   assert.equal(packageData.engines.node, ">=20.12");
+  assert.equal(packageData.scripts["relay:start"], "node relay/server.mjs");
+  assert.equal(
+    packageData.scripts["relay:bootstrap"],
+    "node relay/bootstrap.mjs",
+  );
 });
 
 test("documentation describes the supported security and recovery boundary", async () => {
@@ -119,12 +124,19 @@ test("documentation describes the supported security and recovery boundary", asy
     "RELAY_AGENT_ID",
     "RELAY_ROOM_ID",
     "RELAY_DEVICE_TOKEN",
+    "RELAY_HOST",
+    "RELAY_PORT",
+    "RELAY_STATE_FILE",
+    "RELAY_TLS_CERT_FILE",
+    "RELAY_TLS_KEY_FILE",
   ]) {
     assert.match(example, new RegExp(`\\b${variable}\\b`));
   }
   assert.doesNotMatch(readme, /prints? (?:the )?(?:table )?pin/i);
   assert.match(readme, /outbound `wss:\/\/` connection/i);
   assert.match(readme, /no production hosted relay bundled/i);
+  assert.match(readme, /npm run relay:start/i);
+  assert.match(readme, /npm run relay:bootstrap/i);
 });
 
 test("relay configuration fails closed unless it is complete and secure", async () => {

@@ -5,9 +5,10 @@ provides session and scene navigation, references, notes, player reveals,
 trackers, chat, rolls, and whispers without moving campaign content into a
 database.
 
-This release is hardened for one computer or a trusted local network. It is not
-designed to be exposed directly to the public internet. Worldwide access needs
-a separate hosted relay and authentication boundary.
+The local cockpit is hardened for one computer or a trusted local network. It
+is not designed to be exposed directly to the public internet. The repository
+also contains an experimental, separately-run hosted relay skeleton for
+continued development of worldwide player access.
 
 ## Requirements
 
@@ -245,9 +246,12 @@ identity, tenant isolation, a cloud database, or an internet-facing gateway.
 
 ## Experimental Hosted Relay
 
-The Phase Two connector is disabled unless `RELAY_URL`, `RELAY_AGENT_ID`,
-`RELAY_ROOM_ID`, and `RELAY_DEVICE_TOKEN` are all configured. It opens one
-outbound `wss://` connection and does not make the local HTTP server public.
+The `relay/` service is a Phase Two development skeleton, not a production
+deployment. It keeps the local cockpit authoritative and accepts the agent's
+outbound `wss://` connection plus room-scoped player connections. It stores
+accounts, devices, rooms, invites, memberships, and bounded player-safe room
+projections in a versioned atomic JSON file. Device, invite, and membership
+secrets are stored only as hashes.
 
 The connector publishes only player-safe room projections: explicit text/card
 reveals, visible trackers, scoped chat, and public player identities. Vault
@@ -255,9 +259,50 @@ paths, campaign manuscripts, session notes, local credentials, hidden trackers,
 and secret rolls are rejected at the protocol boundary. Local image reveals
 are omitted until the separate opaque asset-upload service is implemented.
 
-There is no production hosted relay bundled with this repository yet. These
-settings are for protocol and connector development; local and trusted-LAN
-modes remain the supported ways to run a session.
+Create a development account, device, room, and invite:
+
+```bash
+npm run relay:bootstrap -- "dm@example.com" "Campaign laptop" "Tuesday table"
+```
+
+The command prints the device token, room ID, and invite token once. Configure
+the local cockpit connector with the returned values:
+
+```text
+RELAY_URL=wss://relay.example.com/v1/agent/<room-id>
+RELAY_AGENT_ID=<device-id>
+RELAY_ROOM_ID=<room-id>
+RELAY_DEVICE_TOKEN=<device-token>
+```
+
+The connector is disabled unless all four values are present. Start the relay
+as a separate process:
+
+```bash
+npm run relay:start
+```
+
+Development defaults are `127.0.0.1:8787` and
+`relay/data/relay.json`. Configure `RELAY_STATE_FILE` for durable storage.
+Public traffic requires HTTPS/WSS: either configure both
+`RELAY_TLS_CERT_FILE` and `RELAY_TLS_KEY_FILE`, or put the relay behind a
+trusted managed TLS proxy. The local cockpit server remains private and opens
+no inbound internet connection.
+
+Available service boundaries:
+
+- `GET /health` and `GET /readiness`
+- `POST /v1/invites/redeem`
+- `GET /v1/player/session`
+- `WS /v1/agent/<room-id>`
+- `WS /v1/player/<room-id>`
+
+There is no production hosted relay bundled with this repository yet. Before
+public use, this skeleton still needs browser account sign-in, device pairing
+and revocation controls, a remote player UI, an asset service, a production
+database and backups, stronger deployment limits, monitoring, and a dedicated
+security review. Local and trusted-LAN modes remain the supported ways to run
+a session.
 
 ## Validation
 

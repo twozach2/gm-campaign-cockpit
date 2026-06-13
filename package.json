@@ -10,6 +10,8 @@
     "start": "node server.mjs",
     "check": "node validate.mjs",
     "test": "node --test",
-    "new-campaign": "node scaffold.mjs"
+    "new-campaign": "node scaffold.mjs",
+    "relay:start": "node relay/server.mjs",
+    "relay:bootstrap": "node relay/bootstrap.mjs"
   }
 }
