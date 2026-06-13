@@ -1,6 +1,7 @@
 import {
   createHash,
   randomBytes,
+  scryptSync,
   timingSafeEqual,
 } from "node:crypto";
 import { AtomicJsonStore } from "../../lib/atomic-json-store.mjs";
@@ -19,6 +20,7 @@ import {
 
 const MAX_RECORDS = 10_000;
 const MAX_ROOM_CHAT = 200;
+const MIN_PASSPHRASE_LENGTH = 10;
 
 function clone(value) {
   return structuredClone(value);
@@ -26,6 +28,10 @@ function clone(value) {
 
 function secretHash(value) {
   return createHash("sha256").update(String(value)).digest("base64url");
+}
+
+function passwordDigest(passphrase, salt) {
+  return scryptSync(String(passphrase), salt, 32).toString("base64url");
 }
 
 function equalHash(left, right) {
@@ -87,6 +93,7 @@ function validDatabase(value) {
     "invites",
     "memberships",
     "roomStates",
+    "pairings",
   ];
   if (
     collections.some(
@@ -101,6 +108,7 @@ function validDatabase(value) {
     !unique(value.rooms, "id") ||
     !unique(value.invites, "id") ||
     !unique(value.memberships, "id") ||
+    !unique(value.pairings, "id") ||
     !unique(value.roomStates, "roomId")
   ) {
     return false;
@@ -112,6 +120,11 @@ function validDatabase(value) {
         typeof account.email === "string" &&
         account.email.length <= 320 &&
         account.status === "active" &&
+        ((account.passwordSalt === null && account.passwordHash === null) ||
+          (typeof account.passwordSalt === "string" &&
+            account.passwordSalt.length >= 16 &&
+            typeof account.passwordHash === "string" &&
+            account.passwordHash.length >= 32)) &&
         validTimestamp(account.createdAt),
     )
   ) {
@@ -190,6 +203,20 @@ function validDatabase(value) {
   ) {
     return false;
   }
+  if (
+    !value.pairings.every(
+      (pairing) =>
+        validId(pairing.id) &&
+        accountIds.has(pairing.accountId) &&
+        typeof pairing.tokenHash === "string" &&
+        pairing.tokenHash.length > 20 &&
+        validTimestamp(pairing.createdAt) &&
+        validTimestamp(pairing.expiresAt) &&
+        validNullableTimestamp(pairing.redeemedAt),
+    )
+  ) {
+    return false;
+  }
   try {
     for (const roomState of value.roomStates) {
       if (
@@ -253,6 +280,28 @@ function publicMembership(membership) {
     displayName: membership.displayName,
     createdAt: membership.createdAt,
     revokedAt: membership.revokedAt,
+  };
+}
+
+function publicInvite(invite) {
+  return {
+    id: invite.id,
+    roomId: invite.roomId,
+    createdAt: invite.createdAt,
+    expiresAt: invite.expiresAt,
+    revokedAt: invite.revokedAt,
+    maxUses: invite.maxUses,
+    useCount: invite.useCount,
+  };
+}
+
+function publicPairing(pairing) {
+  return {
+    id: pairing.id,
+    accountId: pairing.accountId,
+    createdAt: pairing.createdAt,
+    expiresAt: pairing.expiresAt,
+    redeemedAt: pairing.redeemedAt,
   };
 }
 
@@ -327,8 +376,8 @@ export class RelayStore {
     await this.store.close();
   }
 
-  async bootstrap({ email, deviceName, roomName }) {
-    const account = await this.createAccount({ email });
+  async bootstrap({ email, passphrase, deviceName, roomName }) {
+    const account = await this.createAccount({ email, passphrase });
     const device = await this.createDevice({
       accountId: account.id,
       name: deviceName,
@@ -342,11 +391,25 @@ export class RelayStore {
     return { account, device, room, invite };
   }
 
-  createAccount({ email }) {
+  createAccount({ email, passphrase }) {
     const normalized = String(email || "").trim().toLowerCase();
     if (!normalized || normalized.length > 320 || !normalized.includes("@")) {
       throw error("A valid account email is required", "INVALID_EMAIL");
     }
+    const password =
+      passphrase === undefined ? null : String(passphrase || "");
+    if (
+      password !== null &&
+      (password.length < MIN_PASSPHRASE_LENGTH || password.length > 512)
+    ) {
+      throw error(
+        `Account passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters`,
+        "INVALID_PASSPHRASE",
+      );
+    }
+    const passwordSalt = password === null ? null : this.randomSecret(18);
+    const passwordHash =
+      password === null ? null : passwordDigest(password, passwordSalt);
     return this.transact((draft) => {
       if (draft.accounts.some((account) => account.email === normalized)) {
         throw error("Account already exists", "ACCOUNT_EXISTS", 409);
@@ -355,11 +418,55 @@ export class RelayStore {
         id: this.randomId("acct"),
         email: normalized,
         status: "active",
+        passwordSalt,
+        passwordHash,
         createdAt: this.now(),
       };
       draft.accounts.push(account);
       return publicAccount(account);
     });
+  }
+
+  setAccountPassword(accountId, passphrase) {
+    const password = String(passphrase || "");
+    if (password.length < MIN_PASSPHRASE_LENGTH || password.length > 512) {
+      throw error(
+        `Account passphrase must be at least ${MIN_PASSPHRASE_LENGTH} characters`,
+        "INVALID_PASSPHRASE",
+      );
+    }
+    const passwordSalt = this.randomSecret(18);
+    const passwordHash = passwordDigest(password, passwordSalt);
+    return this.transact((draft) => {
+      const account = draft.accounts.find(
+        (entry) => entry.id === accountId && entry.status === "active",
+      );
+      if (!account) {
+        throw error("Account not found", "ACCOUNT_NOT_FOUND", 404);
+      }
+      account.passwordSalt = passwordSalt;
+      account.passwordHash = passwordHash;
+      return publicAccount(account);
+    });
+  }
+
+  authenticateAccount(email, passphrase) {
+    const normalized = String(email || "").trim().toLowerCase();
+    const account = this.database.accounts.find(
+      (entry) => entry.email === normalized && entry.status === "active",
+    );
+    if (!account?.passwordSalt || !account.passwordHash) return null;
+    const actual = passwordDigest(passphrase, account.passwordSalt);
+    return equalHash(actual, account.passwordHash)
+      ? publicAccount(account)
+      : null;
+  }
+
+  account(accountId) {
+    const account = this.database.accounts.find(
+      (entry) => entry.id === accountId && entry.status === "active",
+    );
+    return account ? publicAccount(account) : null;
   }
 
   createDevice({ accountId, name }) {
@@ -382,6 +489,112 @@ export class RelayStore {
       };
       draft.devices.push(device);
       return { device: publicDevice(device), token };
+    });
+  }
+
+  devices(accountId) {
+    return this.database.devices
+      .filter((device) => device.accountId === accountId)
+      .map(publicDevice);
+  }
+
+  revokeDevice(accountId, deviceId) {
+    return this.transact((draft) => {
+      const device = draft.devices.find(
+        (entry) =>
+          entry.id === deviceId &&
+          entry.accountId === accountId &&
+          entry.revokedAt === null,
+      );
+      if (!device) {
+        throw error("Device not found", "DEVICE_NOT_FOUND", 404);
+      }
+      device.revokedAt = this.now();
+      for (const room of draft.rooms) {
+        if (
+          room.agentDeviceId === device.id &&
+          room.status === "active"
+        ) {
+          room.status = "ended";
+          room.joinsOpen = false;
+          room.endedAt = this.now();
+          this.revokeRoomCapabilities(draft, room.id);
+        }
+      }
+      return publicDevice(device);
+    });
+  }
+
+  createPairing({ accountId, ttlMs = 10 * 60 * 1_000 }) {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000 || ttlMs > 3_600_000) {
+      throw error("Pairing lifetime is invalid", "INVALID_PAIRING_TTL");
+    }
+    const token = this.randomSecret(24);
+    return this.transact((draft) => {
+      if (
+        !draft.accounts.some(
+          (account) => account.id === accountId && account.status === "active",
+        )
+      ) {
+        throw error("Account not found", "ACCOUNT_NOT_FOUND", 404);
+      }
+      const pairing = {
+        id: this.randomId("pair"),
+        accountId,
+        tokenHash: secretHash(token),
+        createdAt: this.now(),
+        expiresAt: this.now() + ttlMs,
+        redeemedAt: null,
+      };
+      draft.pairings.push(pairing);
+      return { pairing: publicPairing(pairing), token };
+    });
+  }
+
+  redeemPairing({ token, name }) {
+    const deviceName = String(name || "").trim();
+    if (!deviceName || deviceName.length > 80) {
+      throw error("A device name is required", "INVALID_DEVICE_NAME");
+    }
+    const tokenHash = secretHash(token);
+    const deviceToken = this.randomSecret();
+    return this.transact((draft) => {
+      const now = this.now();
+      const pairing = draft.pairings.find(
+        (entry) =>
+          equalHash(entry.tokenHash, tokenHash) &&
+          entry.redeemedAt === null &&
+          entry.expiresAt > now,
+      );
+      if (!pairing) {
+        throw error(
+          "Pairing code is invalid or expired",
+          "PAIRING_INVALID",
+          401,
+        );
+      }
+      const account = draft.accounts.find(
+        (entry) =>
+          entry.id === pairing.accountId && entry.status === "active",
+      );
+      if (!account) {
+        throw error("Account not found", "ACCOUNT_NOT_FOUND", 404);
+      }
+      pairing.redeemedAt = now;
+      const device = {
+        id: this.randomId("dev"),
+        accountId: account.id,
+        name: deviceName,
+        tokenHash: secretHash(deviceToken),
+        createdAt: now,
+        revokedAt: null,
+      };
+      draft.devices.push(device);
+      return {
+        account: publicAccount(account),
+        device: publicDevice(device),
+        token: deviceToken,
+      };
     });
   }
 
@@ -418,6 +631,53 @@ export class RelayStore {
     });
   }
 
+  rooms(accountId) {
+    return this.database.rooms
+      .filter((room) => room.accountId === accountId)
+      .map(publicRoom);
+  }
+
+  roomForAccount(accountId, roomId) {
+    const room = this.database.rooms.find(
+      (entry) => entry.id === roomId && entry.accountId === accountId,
+    );
+    return room ? publicRoom(room) : null;
+  }
+
+  setRoomJoins(accountId, roomId, joinsOpen) {
+    if (typeof joinsOpen !== "boolean") {
+      throw error("joinsOpen must be a boolean", "INVALID_JOINS_STATE");
+    }
+    return this.transact((draft) => {
+      const room = draft.rooms.find(
+        (entry) =>
+          entry.id === roomId &&
+          entry.accountId === accountId &&
+          entry.status === "active",
+      );
+      if (!room) throw error("Room not found", "ROOM_NOT_FOUND", 404);
+      room.joinsOpen = joinsOpen;
+      return publicRoom(room);
+    });
+  }
+
+  endRoom(accountId, roomId) {
+    return this.transact((draft) => {
+      const room = draft.rooms.find(
+        (entry) =>
+          entry.id === roomId &&
+          entry.accountId === accountId &&
+          entry.status === "active",
+      );
+      if (!room) throw error("Room not found", "ROOM_NOT_FOUND", 404);
+      room.status = "ended";
+      room.joinsOpen = false;
+      room.endedAt = this.now();
+      this.revokeRoomCapabilities(draft, room.id);
+      return publicRoom(room);
+    });
+  }
+
   createInvite({
     roomId,
     ttlMs = 24 * 60 * 60 * 1_000,
@@ -447,16 +707,54 @@ export class RelayStore {
       };
       draft.invites.push(invite);
       return {
-        invite: {
-          id: invite.id,
-          roomId,
-          createdAt: invite.createdAt,
-          expiresAt: invite.expiresAt,
-          maxUses,
-          useCount: 0,
-        },
+        invite: publicInvite(invite),
         token,
       };
+    });
+  }
+
+  invites(roomId) {
+    return this.database.invites
+      .filter((invite) => invite.roomId === roomId)
+      .map(publicInvite);
+  }
+
+  rotateInvite(accountId, roomId, options = {}) {
+    const token = this.randomSecret(24);
+    const ttlMs = options.ttlMs ?? 24 * 60 * 60 * 1_000;
+    const maxUses = options.maxUses ?? 20;
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 60_000) {
+      throw error("Invite lifetime is too short", "INVALID_INVITE_TTL");
+    }
+    if (!Number.isSafeInteger(maxUses) || maxUses < 1 || maxUses > 1_000) {
+      throw error("Invite use limit is invalid", "INVALID_INVITE_LIMIT");
+    }
+    return this.transact((draft) => {
+      const room = draft.rooms.find(
+        (entry) =>
+          entry.id === roomId &&
+          entry.accountId === accountId &&
+          entry.status === "active",
+      );
+      if (!room) throw error("Room not found", "ROOM_NOT_FOUND", 404);
+      const now = this.now();
+      for (const invite of draft.invites) {
+        if (invite.roomId === roomId && invite.revokedAt === null) {
+          invite.revokedAt = now;
+        }
+      }
+      const invite = {
+        id: this.randomId("invite"),
+        roomId,
+        tokenHash: secretHash(token),
+        createdAt: now,
+        expiresAt: now + ttlMs,
+        revokedAt: null,
+        maxUses,
+        useCount: 0,
+      };
+      draft.invites.push(invite);
+      return { invite: publicInvite(invite), token };
     });
   }
 
@@ -579,6 +877,26 @@ export class RelayStore {
     });
   }
 
+  removeMembership(accountId, roomId, membershipId) {
+    return this.transact((draft) => {
+      const room = draft.rooms.find(
+        (entry) => entry.id === roomId && entry.accountId === accountId,
+      );
+      if (!room) throw error("Room not found", "ROOM_NOT_FOUND", 404);
+      const membership = draft.memberships.find(
+        (entry) =>
+          entry.id === membershipId &&
+          entry.roomId === roomId &&
+          entry.revokedAt === null,
+      );
+      if (!membership) {
+        throw error("Membership not found", "MEMBERSHIP_NOT_FOUND", 404);
+      }
+      membership.revokedAt = this.now();
+      return publicMembership(membership);
+    });
+  }
+
   roomState(roomId) {
     const state = this.database.roomStates.find(
       (entry) => entry.roomId === roomId,
@@ -668,6 +986,20 @@ export class RelayStore {
       room.agentDeviceId !== device.id
     ) {
       throw error("Device is not authorized for room", "ROOM_FORBIDDEN", 403);
+    }
+  }
+
+  revokeRoomCapabilities(draft, roomId) {
+    const now = this.now();
+    for (const invite of draft.invites) {
+      if (invite.roomId === roomId && invite.revokedAt === null) {
+        invite.revokedAt = now;
+      }
+    }
+    for (const membership of draft.memberships) {
+      if (membership.roomId === roomId && membership.revokedAt === null) {
+        membership.revokedAt = now;
+      }
     }
   }
 }

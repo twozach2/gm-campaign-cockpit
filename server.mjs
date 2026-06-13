@@ -23,6 +23,14 @@ import {
 } from "./lib/logger.mjs";
 import { TokenBucketRateLimiter } from "./lib/rate-limit.mjs";
 import { RelayConnector } from "./lib/relay-connector.mjs";
+import {
+  agentUrl,
+  controlUrlFromAgentUrl,
+  emptyRelayDeviceConfig,
+  normalizeRelayControlUrl,
+  publicRelayDeviceConfig,
+  validRelayDeviceConfig,
+} from "./lib/relay-device-config.mjs";
 import { RelayRoomBridge } from "./lib/relay-room-bridge.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import {
@@ -98,6 +106,11 @@ const MAX_FILE_BYTES = positiveIntegerEnv(
   25 * 1024 * 1024,
 );
 const MAX_LIMITER_KEYS = positiveIntegerEnv("MAX_LIMITER_KEYS", 2_000);
+const stateDir = path.resolve(
+  process.env.STATE_DIR || path.join(appRoot, "data"),
+);
+const RELAY_DEVICE_FILE =
+  process.env.RELAY_DEVICE_FILE || path.join(stateDir, "relay-device.json");
 const RELAY_URL = String(process.env.RELAY_URL || "").trim();
 const RELAY_AGENT_ID = String(process.env.RELAY_AGENT_ID || "").trim();
 const RELAY_ROOM_ID = String(process.env.RELAY_ROOM_ID || "").trim();
@@ -107,7 +120,10 @@ const RELAY_DEVICE_TOKEN = String(
 const RELAY_APP_VERSION = String(
   process.env.RELAY_APP_VERSION || "0.1.0",
 ).trim();
-const RELAY_ENABLED = Boolean(
+const RELAY_CONTROL_URL = String(
+  process.env.RELAY_CONTROL_URL || "",
+).trim();
+const ENV_RELAY_ENABLED = Boolean(
   RELAY_URL || RELAY_AGENT_ID || RELAY_ROOM_ID || RELAY_DEVICE_TOKEN,
 );
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
@@ -164,7 +180,7 @@ if (REMOTE_BINDING && TABLE_PIN.length < 6) {
     "TABLE_PIN must be at least 6 characters when remote DM access is enabled.",
   );
 }
-if (RELAY_ENABLED) {
+if (ENV_RELAY_ENABLED) {
   for (const [name, value] of Object.entries({
     RELAY_URL,
     RELAY_AGENT_ID,
@@ -187,6 +203,37 @@ if (RELAY_ENABLED) {
   }
 }
 
+const relayDeviceStore = new AtomicJsonStore({
+  file: RELAY_DEVICE_FILE,
+  validate: validRelayDeviceConfig,
+  onWarning: (_message, details = {}) => {
+    logger.warn("relay_device_recovery", {
+      action: details.code || "RECOVERY_WARNING",
+    });
+  },
+});
+let relayConfig = emptyRelayDeviceConfig(
+  RELAY_CONTROL_URL ? normalizeRelayControlUrl(RELAY_CONTROL_URL) : "",
+);
+if (ENV_RELAY_ENABLED) {
+  relayConfig = {
+    schemaVersion: 1,
+    controlUrl: controlUrlFromAgentUrl(RELAY_URL),
+    accountId: "",
+    deviceId: RELAY_AGENT_ID,
+    deviceName: "Environment configured device",
+    deviceToken: RELAY_DEVICE_TOKEN,
+    roomId: RELAY_ROOM_ID,
+  };
+} else {
+  const persistedRelay = await relayDeviceStore.load(relayConfig);
+  relayConfig = {
+    ...persistedRelay,
+    controlUrl:
+      relayConfig.controlUrl || persistedRelay.controlUrl,
+  };
+}
+
 const presentation = {
   items: [],
   updatedAt: Date.now(),
@@ -195,6 +242,13 @@ const chat = [];
 const clients = new Set();
 const relayRoom = new RelayRoomBridge();
 let relayConnector = null;
+let relayRooms = [];
+let relayStatus = {
+  enabled: false,
+  state: relayConfig.deviceId ? "unassigned" : "unpaired",
+  revision: 0,
+  acceptedRevision: 0,
+};
 const playerSessions = new SessionRegistry({
   maxPlayers: MAX_PLAYERS,
   maxTickets: MAX_STREAM_TICKETS,
@@ -210,9 +264,6 @@ const rateLimiter = new TokenBucketRateLimiter({
 let messageSeq = 0;
 let itemSeq = 0;
 
-const stateDir = path.resolve(
-  process.env.STATE_DIR || path.join(appRoot, "data"),
-);
 const TRACKERS_FILE =
   process.env.TRACKERS_FILE || path.join(stateDir, "trackers.json");
 const status = {
@@ -551,24 +602,113 @@ function relaySnapshot() {
   });
 }
 
-if (RELAY_ENABLED) {
+function relayPublicState() {
+  return publicRelayDeviceConfig(relayConfig, relayStatus, relayRooms);
+}
+
+function broadcastRelayState() {
+  const payload = relayPublicState();
+  for (const client of clients) {
+    if (client.role === "dm") writeEvent(client, "relay-state", payload);
+  }
+}
+
+function configureRelayConnector() {
+  relayConnector?.stop();
+  relayConnector = null;
+  relayRoom.applyMembership({ players: [], joinsOpen: false });
+  if (
+    !relayConfig.controlUrl ||
+    !relayConfig.deviceId ||
+    !relayConfig.deviceToken ||
+    !relayConfig.roomId
+  ) {
+    relayStatus = {
+      enabled: false,
+      state: relayConfig.deviceId ? "unassigned" : "unpaired",
+      revision: 0,
+      acceptedRevision: 0,
+    };
+    broadcastRelayState();
+    return;
+  }
   relayConnector = new RelayConnector({
-    url: RELAY_URL,
-    token: RELAY_DEVICE_TOKEN,
-    agentId: RELAY_AGENT_ID,
-    roomId: RELAY_ROOM_ID,
+    url: agentUrl(relayConfig.controlUrl, relayConfig.roomId),
+    token: relayConfig.deviceToken,
+    agentId: relayConfig.deviceId,
+    roomId: relayConfig.roomId,
     appVersion: RELAY_APP_VERSION,
     getSnapshot: relaySnapshot,
     handleCommand: handleRelayCommand,
     handleMembership: handleRelayMembership,
     logger,
-    onStateChange: (relayStatus) => {
+    onStateChange: (nextRelayStatus) => {
+      relayStatus = nextRelayStatus;
       logger.info("relay_state", {
-        state: relayStatus.state,
-        revision: relayStatus.revision,
+        state: nextRelayStatus.state,
+        revision: nextRelayStatus.revision,
       });
+      broadcastRelayState();
     },
   });
+  relayStatus = relayConnector.status();
+  relayConnector.start();
+}
+
+async function relayControlRequest(pathname, { method = "GET", body } = {}) {
+  if (!relayConfig.controlUrl) {
+    throw Object.assign(new Error("RELAY_CONTROL_URL is not configured"), {
+      status: 503,
+      code: "RELAY_NOT_CONFIGURED",
+    });
+  }
+  const headers = {};
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (relayConfig.deviceToken) {
+    headers.Authorization = `Bearer ${relayConfig.deviceToken}`;
+  }
+  const response = await fetch(`${relayConfig.controlUrl}${pathname}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(8_000),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw Object.assign(
+      new Error(data.error || `Relay request failed (${response.status})`),
+      {
+        status: response.status,
+        code: data.code || "RELAY_REQUEST_FAILED",
+      },
+    );
+  }
+  return data;
+}
+
+async function refreshRelayRooms() {
+  if (!relayConfig.deviceToken) {
+    relayRooms = [];
+    return relayRooms;
+  }
+  const state = await relayControlRequest("/v1/device/state");
+  if (state.device.id !== relayConfig.deviceId) {
+    throw new Error("Relay returned a mismatched device identity");
+  }
+  relayConfig.deviceName = state.device.name;
+  relayRooms = state.rooms;
+  if (
+    relayConfig.roomId &&
+    !relayRooms.some(
+      (room) => room.id === relayConfig.roomId && room.status === "active",
+    )
+  ) {
+    relayConfig.roomId = "";
+    if (!ENV_RELAY_ENABLED) await relayDeviceStore.write(relayConfig);
+    configureRelayConnector();
+  }
+  broadcastRelayState();
+  return relayRooms;
 }
 
 setInterval(() => {
@@ -1092,7 +1232,92 @@ async function api(request, response, url) {
       presentation,
       chat,
       status: statusFor("dm"),
+      relay: relayPublicState(),
     });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/relay/state") {
+    return sendJson(response, 200, relayPublicState());
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/relay/pair") {
+    if (ENV_RELAY_ENABLED) {
+      return sendJson(response, 409, {
+        error: "Environment-managed relay settings cannot be paired in the UI",
+      });
+    }
+    const paired = await relayControlRequest("/v1/devices/pair", {
+      method: "POST",
+      body: {
+        pairingToken: body.pairingToken,
+        deviceName: body.deviceName,
+      },
+    });
+    relayConfig = {
+      ...emptyRelayDeviceConfig(relayConfig.controlUrl),
+      accountId: paired.account.id,
+      deviceId: paired.device.id,
+      deviceName: paired.device.name,
+      deviceToken: paired.token,
+    };
+    await relayDeviceStore.write(relayConfig);
+    relayStatus = {
+      enabled: false,
+      state: "unassigned",
+      revision: 0,
+      acceptedRevision: 0,
+    };
+    await refreshRelayRooms();
+    return sendJson(response, 201, relayPublicState());
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/relay/refresh") {
+    await refreshRelayRooms();
+    return sendJson(response, 200, relayPublicState());
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/relay/connect") {
+    if (ENV_RELAY_ENABLED) {
+      return sendJson(response, 409, {
+        error: "Environment-managed relay room cannot be changed in the UI",
+      });
+    }
+    await refreshRelayRooms();
+    const room = relayRooms.find(
+      (entry) => entry.id === body.roomId && entry.status === "active",
+    );
+    if (!room) {
+      return sendJson(response, 404, {
+        error: "That room is not assigned to this device",
+      });
+    }
+    relayConfig.roomId = room.id;
+    await relayDeviceStore.write(relayConfig);
+    configureRelayConnector();
+    return sendJson(response, 200, relayPublicState());
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/relay/unpair") {
+    if (ENV_RELAY_ENABLED) {
+      return sendJson(response, 409, {
+        error: "Environment-managed relay settings cannot be removed in the UI",
+      });
+    }
+    relayConnector?.stop();
+    relayConnector = null;
+    relayRooms = [];
+    relayConfig = emptyRelayDeviceConfig(relayConfig.controlUrl);
+    relayStatus = {
+      enabled: false,
+      state: "unpaired",
+      revision: 0,
+      acceptedRevision: 0,
+    };
+    await relayDeviceStore.write(relayConfig);
+    relayRoom.applyMembership({ players: [], joinsOpen: false });
+    broadcastPresence();
+    broadcastRelayState();
+    return sendJson(response, 200, relayPublicState());
   }
 
   if (request.method === "GET" && url.pathname === "/api/player/image") {
@@ -1464,7 +1689,11 @@ async function shutdown(signal) {
     relayConnector?.stop();
     closeStreams();
     await closeHttpServer();
-    await Promise.all([trackerStore.close(), vault.flushWrites()]);
+    await Promise.all([
+      trackerStore.close(),
+      relayDeviceStore.close(),
+      vault.flushWrites(),
+    ]);
     clearTimeout(timeout);
     logger.info("shutdown_complete", {});
     if (process.connected) process.disconnect();
@@ -1514,7 +1743,16 @@ try {
   });
 }
 
-relayConnector?.start();
+if (relayConfig.deviceToken) {
+  try {
+    await refreshRelayRooms();
+  } catch (error) {
+    logger.warn("relay_device_refresh_failed", {
+      reason: error.code || "RELAY_UNAVAILABLE",
+    });
+  }
+}
+configureRelayConnector();
 
 server.listen(port, host, () => {
   const lan = lanAddress();
@@ -1527,7 +1765,7 @@ server.listen(port, host, () => {
     mode: REMOTE_BINDING ? "lan" : "local",
     localDmAccess: ALLOW_LOCAL_DM,
     remoteDmAccess: ALLOW_REMOTE_DM,
-    relayEnabled: RELAY_ENABLED,
+    relayEnabled: relayStatus.enabled,
     ready: readiness.persistence && readiness.vault,
     dmUrl: `http://${host}:${port}`,
     playerUrl: `http://${lan}:${port}/player.html`,

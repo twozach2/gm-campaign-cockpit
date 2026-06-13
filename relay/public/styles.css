@@ -1,0 +1,391 @@
+:root {
+  color-scheme: dark;
+  --background: #0d0b14;
+  --panel: #171421;
+  --panel-raised: #211c2d;
+  --line: #383047;
+  --line-bright: #5c4a70;
+  --text: #f3eee5;
+  --muted: #ada4b9;
+  --gold: #e9b868;
+  --gold-bright: #ffd697;
+  --green: #65d6a5;
+  --red: #ff7896;
+  --amber: #edbb68;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 15% 0%, rgba(88, 58, 116, 0.25), transparent 35%),
+    radial-gradient(circle at 90% 15%, rgba(128, 78, 47, 0.16), transparent 30%),
+    var(--background);
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  padding: 10px 14px;
+  border: 1px solid var(--gold);
+  border-radius: 9px;
+  color: #211508;
+  background: linear-gradient(180deg, var(--gold-bright), var(--gold));
+  font-weight: 700;
+  cursor: pointer;
+}
+
+button:hover {
+  filter: brightness(1.08);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+button.quiet {
+  padding: 7px 10px;
+  color: var(--text);
+  border-color: var(--line-bright);
+  background: transparent;
+  font-weight: 600;
+}
+
+button.danger-button {
+  color: var(--red);
+  border-color: rgba(255, 120, 150, 0.45);
+}
+
+.shell {
+  width: min(1180px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 28px 0 72px;
+}
+
+.masthead,
+.dashboard-heading,
+.section-heading,
+.room-heading,
+.list-card,
+.secret-callout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.masthead {
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--line);
+}
+
+.masthead h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+.masthead h1 {
+  margin-bottom: 0;
+  font-family: Georgia, serif;
+  font-size: clamp(28px, 5vw, 44px);
+}
+
+.masthead-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.service-state {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.service-state::before {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  content: "";
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.login-layout {
+  display: grid;
+  grid-template-columns: 1.2fr minmax(320px, 0.8fr);
+  gap: 42px;
+  align-items: center;
+  min-height: 68vh;
+}
+
+.intro h2 {
+  max-width: 680px;
+  margin-bottom: 18px;
+  font-family: Georgia, serif;
+  font-size: clamp(38px, 7vw, 72px);
+  line-height: 0.98;
+}
+
+.intro p {
+  max-width: 650px;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1.65;
+}
+
+.panel {
+  padding: 22px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: linear-gradient(145deg, rgba(33, 28, 45, 0.96), rgba(20, 17, 29, 0.96));
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.2);
+}
+
+.login-panel {
+  padding: 30px;
+}
+
+label {
+  display: grid;
+  gap: 7px;
+  margin-bottom: 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+input,
+select {
+  width: 100%;
+  padding: 11px 12px;
+  color: var(--text);
+  border: 1px solid var(--line-bright);
+  border-radius: 9px;
+  outline: none;
+  background: #0f0d17;
+}
+
+input:focus,
+select:focus {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 3px rgba(233, 184, 104, 0.13);
+}
+
+.error {
+  min-height: 20px;
+  color: var(--red);
+  font-size: 13px;
+}
+
+.dashboard-heading {
+  padding: 34px 0 22px;
+}
+
+.dashboard-heading h2 {
+  margin-bottom: 0;
+  font-family: Georgia, serif;
+  font-size: 30px;
+}
+
+.control-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+.muted {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.stack {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.list-card {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(10, 8, 15, 0.35);
+}
+
+.list-card strong,
+.list-card span {
+  display: block;
+}
+
+.list-card span {
+  max-width: 260px;
+  margin-top: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.card-actions,
+.room-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.badge.ok {
+  color: var(--green);
+  background: rgba(101, 214, 165, 0.13);
+}
+
+.badge.warn {
+  color: var(--amber);
+  background: rgba(237, 187, 104, 0.13);
+}
+
+.badge.danger {
+  color: var(--red);
+  background: rgba(255, 120, 150, 0.13);
+}
+
+.secret-callout {
+  margin-bottom: 18px;
+  padding: 16px;
+  border: 1px solid rgba(233, 184, 104, 0.55);
+  border-radius: 12px;
+  background: rgba(233, 184, 104, 0.09);
+}
+
+.secret-callout code {
+  flex: 1;
+  min-width: 0;
+  padding: 8px;
+  overflow-wrap: anywhere;
+  color: var(--gold-bright);
+}
+
+.rooms-section {
+  margin-top: 32px;
+}
+
+.room-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 18px;
+}
+
+.room-card h3 {
+  margin-bottom: 0;
+}
+
+.room-card dl {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 20px 0;
+}
+
+.room-card dl div {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+
+.room-card dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.room-card dd {
+  margin: 5px 0 0;
+  font-weight: 800;
+}
+
+.members {
+  margin-top: 22px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.member-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+}
+
+.empty-state {
+  padding: 46px;
+  color: var(--muted);
+  border: 1px dashed var(--line-bright);
+  border-radius: 14px;
+  text-align: center;
+}
+
+.toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  padding: 12px 16px;
+  color: var(--text);
+  border: 1px solid var(--line-bright);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 12px 50px rgba(0, 0, 0, 0.4);
+}
+
+.hidden {
+  display: none !important;
+}
+
+@media (max-width: 780px) {
+  .login-layout,
+  .control-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .login-layout {
+    padding: 50px 0;
+  }
+
+  .masthead,
+  .dashboard-heading,
+  .secret-callout {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .room-card dl {
+    grid-template-columns: 1fr;
+  }
+}

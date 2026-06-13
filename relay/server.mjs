@@ -34,12 +34,29 @@ const tls =
     : null;
 const logger = createLogger();
 const store = new RelayStore({ file: stateFile, logger });
+const publicOrigin = process.env.RELAY_PUBLIC_ORIGIN || undefined;
+if (publicOrigin) {
+  const parsed = new URL(publicOrigin);
+  const loopback = ["127.0.0.1", "::1", "localhost"].includes(
+    parsed.hostname.toLowerCase(),
+  );
+  if (
+    parsed.origin !== publicOrigin.replace(/\/$/, "") ||
+    (parsed.protocol !== "https:" &&
+      !(parsed.protocol === "http:" && loopback))
+  ) {
+    throw new Error(
+      "RELAY_PUBLIC_ORIGIN must be an HTTPS origin, except for loopback development",
+    );
+  }
+}
 const service = new HostedRelayService({
   store,
   host,
   port,
   tls,
   logger,
+  publicOrigin,
 });
 const address = await service.start();
 logger.info("hosted_relay_listening", {

@@ -57,11 +57,12 @@ test("relay store migrates schema zero before becoming ready", async (t) => {
       accounts: [],
     },
   });
-  assert.equal(store.snapshot().schemaVersion, 1);
+  assert.equal(store.snapshot().schemaVersion, 2);
   const persisted = JSON.parse(await readFile(file, "utf8"));
-  assert.equal(persisted.schemaVersion, 1);
+  assert.equal(persisted.schemaVersion, 2);
   assert.deepEqual(persisted.devices, []);
   assert.deepEqual(persisted.roomStates, []);
+  assert.deepEqual(persisted.pairings, []);
 });
 
 test("bootstrap persists accounts, devices, rooms, and invites without secrets", async (t) => {
@@ -212,4 +213,89 @@ test("room state remains isolated and chat retention is bounded", async (t) => {
   assert.equal(firstState.state.chat.length, 200);
   assert.equal(firstState.state.chat[0].id, 6);
   assert.equal(secondState.state.chat.length, 0);
+});
+
+test("account passwords authenticate without exposing password material", async (t) => {
+  const { file, store } = await createStore(t);
+  const account = await store.createAccount({
+    email: "secure@example.test",
+    passphrase: "a sufficiently long passphrase",
+  });
+  assert.deepEqual(
+    store.authenticateAccount(
+      "SECURE@example.test",
+      "a sufficiently long passphrase",
+    ),
+    account,
+  );
+  assert.equal(
+    store.authenticateAccount("secure@example.test", "wrong passphrase"),
+    null,
+  );
+  const persisted = await readFile(file, "utf8");
+  assert.doesNotMatch(persisted, /a sufficiently long passphrase/);
+  assert.match(persisted, /passwordHash/);
+});
+
+test("pairing capabilities are expiring and single-use", async (t) => {
+  const { store } = await createStore(t);
+  const account = await store.createAccount({
+    email: "pair@example.test",
+    passphrase: "pairing passphrase",
+  });
+  const pairing = await store.createPairing({ accountId: account.id });
+  const paired = await store.redeemPairing({
+    token: pairing.token,
+    name: "MacBook",
+  });
+  assert.equal(paired.account.id, account.id);
+  assert.equal(paired.device.name, "MacBook");
+  assert.deepEqual(store.authenticateDevice(paired.token), paired.device);
+  await assert.rejects(
+    store.redeemPairing({ token: pairing.token, name: "Another device" }),
+    (error) => error.code === "PAIRING_INVALID" && error.status === 401,
+  );
+});
+
+test("account lifecycle controls revoke devices, invites, rooms, and memberships", async (t) => {
+  const { store } = await createStore(t);
+  const created = await bootstrap(store);
+  const joined = await store.redeemInvite({
+    token: created.invite.token,
+    displayName: "Aria",
+  });
+
+  const closed = await store.setRoomJoins(
+    created.account.id,
+    created.room.id,
+    false,
+  );
+  assert.equal(closed.joinsOpen, false);
+  const rotated = await store.rotateInvite(
+    created.account.id,
+    created.room.id,
+  );
+  assert.ok(rotated.token);
+  assert.equal(
+    store.invites(created.room.id).filter((invite) => invite.revokedAt === null)
+      .length,
+    1,
+  );
+  const removed = await store.removeMembership(
+    created.account.id,
+    created.room.id,
+    joined.membership.id,
+  );
+  assert.ok(removed.revokedAt);
+  assert.equal(store.authenticateMembership(joined.token), null);
+
+  const ended = await store.endRoom(created.account.id, created.room.id);
+  assert.equal(ended.status, "ended");
+  assert.equal(ended.joinsOpen, false);
+  const revokedDevice = await store.revokeDevice(
+    created.account.id,
+    created.device.device.id,
+  );
+  assert.ok(revokedDevice.revokedAt);
+  assert.equal(store.authenticateDevice(created.device.token), null);
 });

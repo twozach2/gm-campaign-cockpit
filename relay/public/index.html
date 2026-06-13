@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GM Campaign Relay</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <span class="eyebrow">GM Campaign Cockpit</span>
+          <h1>Hosted Relay</h1>
+        </div>
+        <div class="masthead-actions">
+          <span id="service-state" class="service-state">Checking service</span>
+          <button id="logout" class="quiet hidden" type="button">Log out</button>
+        </div>
+      </header>
+
+      <section id="login-view" class="login-layout">
+        <div class="intro">
+          <span class="eyebrow">Worldwide table access</span>
+          <h2>Your campaign stays home.</h2>
+          <p>
+            This relay carries only the player-safe room state your local
+            cockpit explicitly publishes. Manuscripts, notes, and vault paths
+            remain on the DM's computer.
+          </p>
+        </div>
+        <form id="login-form" class="panel login-panel">
+          <span class="eyebrow">Account access</span>
+          <h2>Sign in</h2>
+          <label>
+            <span>Email</span>
+            <input id="email" type="email" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Passphrase</span>
+            <input id="passphrase" type="password" autocomplete="current-password" required>
+          </label>
+          <p id="login-error" class="error" role="alert"></p>
+          <button type="submit">Open relay controls</button>
+        </form>
+      </section>
+
+      <section id="dashboard" class="hidden">
+        <div class="dashboard-heading">
+          <div>
+            <span class="eyebrow">Account</span>
+            <h2 id="account-email">Loading...</h2>
+          </div>
+          <button id="refresh" class="quiet" type="button">Refresh</button>
+        </div>
+
+        <div id="one-time-secret" class="secret-callout hidden" role="status">
+          <div>
+            <span class="eyebrow">Shown once</span>
+            <strong id="secret-title"></strong>
+          </div>
+          <code id="secret-value"></code>
+          <button id="copy-secret" class="quiet" type="button">Copy</button>
+        </div>
+
+        <div class="control-grid">
+          <section class="panel">
+            <span class="eyebrow">Local installations</span>
+            <h3>Devices</h3>
+            <p class="muted">
+              Generate a short-lived pairing capability, then redeem it from
+              the DM's local cockpit.
+            </p>
+            <button id="create-pairing" type="button">Create pairing code</button>
+            <div id="device-list" class="stack"></div>
+          </section>
+
+          <section class="panel">
+            <span class="eyebrow">Active campaign</span>
+            <h3>Create a room</h3>
+            <form id="room-form">
+              <label>
+                <span>Paired device</span>
+                <select id="room-device" required></select>
+              </label>
+              <label>
+                <span>Room name</span>
+                <input id="room-name" maxlength="120" placeholder="Tuesday night campaign" required>
+              </label>
+              <button type="submit">Create room and invite</button>
+            </form>
+          </section>
+        </div>
+
+        <section class="rooms-section">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Tables</span>
+              <h3>Rooms</h3>
+            </div>
+          </div>
+          <div id="room-list" class="room-grid"></div>
+        </section>
+      </section>
+
+      <div id="toast" class="toast hidden" role="status"></div>
+    </main>
+    <script type="module" src="/admin.js"></script>
+  </body>
+</html>

@@ -23,6 +23,7 @@
           <strong id="session-name"></strong>
         </div>
         <div class="topbar-actions">
+          <button id="relay-open" class="connection-state relay-state-button" data-state="disabled" type="button">Relay off</button>
           <span id="dm-connection" class="connection-state" data-state="connecting" aria-live="polite">Connecting</span>
           <div class="save-state" id="save-state" aria-live="polite">Local vault</div>
           <button id="dm-logout" class="ghost-button-sm" type="button">Log out</button>
@@ -174,6 +175,52 @@
           <button id="preview-close" class="icon-button" type="button" aria-label="Close">×</button>
         </div>
         <div id="preview-body" class="preview-stage"></div>
+      </div>
+    </div>
+
+    <div id="relay-modal" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="relay-title">
+      <div class="modal-card relay-card">
+        <div class="modal-header">
+          <div>
+            <span class="eyebrow">Worldwide access</span>
+            <h2 id="relay-title">Hosted relay</h2>
+          </div>
+          <button id="relay-close" class="icon-button" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="relay-body">
+          <div id="relay-summary" class="relay-summary"></div>
+
+          <div id="relay-unconfigured" class="relay-panel hidden">
+            <h3>Relay address needed</h3>
+            <p>Add <code>RELAY_CONTROL_URL=https://your-relay.example</code> to the local <code>.env</code> file, then restart the cockpit.</p>
+          </div>
+
+          <form id="relay-pair-form" class="relay-panel hidden">
+            <h3>Pair this installation</h3>
+            <p>Generate a pairing code from the hosted relay account page. The code expires after ten minutes and works once.</p>
+            <label class="field">
+              <span>Device name</span>
+              <input id="relay-device-name" maxlength="80" value="Campaign computer" required>
+            </label>
+            <label class="field">
+              <span>Pairing code</span>
+              <input id="relay-pairing-token" maxlength="512" autocomplete="off" required>
+            </label>
+            <button type="submit">Pair device</button>
+          </form>
+
+          <div id="relay-paired" class="relay-panel hidden">
+            <label class="field">
+              <span>Assigned room</span>
+              <select id="relay-room"></select>
+            </label>
+            <div class="relay-actions">
+              <button id="relay-connect" type="button">Connect room</button>
+              <button id="relay-refresh" class="ghost-button" type="button">Refresh rooms</button>
+              <button id="relay-unpair" class="ghost-button danger-text" type="button">Forget device</button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

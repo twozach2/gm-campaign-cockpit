@@ -1,4 +1,4 @@
-export const RELAY_SCHEMA_VERSION = 1;
+export const RELAY_SCHEMA_VERSION = 2;
 
 export function emptyRelayDatabase() {
   return {
@@ -9,6 +9,7 @@ export function emptyRelayDatabase() {
     invites: [],
     memberships: [],
     roomStates: [],
+    pairings: [],
   };
 }
 
@@ -22,8 +23,9 @@ export function canMigrateRelayDatabase(value) {
     typeof value === "object" &&
     !Array.isArray(value) &&
     (value.schemaVersion === undefined ||
-      value.schemaVersion === 0 ||
-      value.schemaVersion === RELAY_SCHEMA_VERSION)
+      (Number.isSafeInteger(value.schemaVersion) &&
+        value.schemaVersion >= 0 &&
+        value.schemaVersion <= RELAY_SCHEMA_VERSION))
   );
 }
 
@@ -37,15 +39,29 @@ export function migrateRelayDatabase(value) {
       `Relay database schema ${version} is newer than supported schema ${RELAY_SCHEMA_VERSION}`,
     );
   }
-  if (version === RELAY_SCHEMA_VERSION) return structuredClone(value);
-
-  return {
-    schemaVersion: RELAY_SCHEMA_VERSION,
-    accounts: recordArray(value, "accounts"),
-    devices: recordArray(value, "devices"),
-    rooms: recordArray(value, "rooms"),
-    invites: recordArray(value, "invites"),
-    memberships: recordArray(value, "memberships"),
-    roomStates: recordArray(value, "roomStates"),
-  };
+  let migrated = structuredClone(value);
+  if (version === 0) {
+    migrated = {
+      schemaVersion: 1,
+      accounts: recordArray(migrated, "accounts"),
+      devices: recordArray(migrated, "devices"),
+      rooms: recordArray(migrated, "rooms"),
+      invites: recordArray(migrated, "invites"),
+      memberships: recordArray(migrated, "memberships"),
+      roomStates: recordArray(migrated, "roomStates"),
+    };
+  }
+  if (migrated.schemaVersion === 1) {
+    migrated = {
+      ...migrated,
+      schemaVersion: 2,
+      accounts: recordArray(migrated, "accounts").map((account) => ({
+        ...account,
+        passwordSalt: null,
+        passwordHash: null,
+      })),
+      pairings: [],
+    };
+  }
+  return migrated;
 }

@@ -26,6 +26,7 @@ const state = {
   dmStreamReconnect: null,
   dmStreamStatus: "connecting",
   dmCsrfToken: null,
+  relay: null,
 };
 
 const elements = {
@@ -81,6 +82,19 @@ const elements = {
   dmLoginError: document.querySelector("#dm-login-error"),
   dmLogout: document.querySelector("#dm-logout"),
   dmConnection: document.querySelector("#dm-connection"),
+  relayOpen: document.querySelector("#relay-open"),
+  relayModal: document.querySelector("#relay-modal"),
+  relayClose: document.querySelector("#relay-close"),
+  relaySummary: document.querySelector("#relay-summary"),
+  relayUnconfigured: document.querySelector("#relay-unconfigured"),
+  relayPairForm: document.querySelector("#relay-pair-form"),
+  relayDeviceName: document.querySelector("#relay-device-name"),
+  relayPairingToken: document.querySelector("#relay-pairing-token"),
+  relayPaired: document.querySelector("#relay-paired"),
+  relayRoom: document.querySelector("#relay-room"),
+  relayConnect: document.querySelector("#relay-connect"),
+  relayRefresh: document.querySelector("#relay-refresh"),
+  relayUnpair: document.querySelector("#relay-unpair"),
 };
 
 async function request(url, options = {}) {
@@ -613,6 +627,10 @@ elements.notes.addEventListener("blur", () => {
 });
 
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && elements.relayModal && !elements.relayModal.classList.contains("hidden")) {
+    closeRelayModal();
+    return;
+  }
   if (event.key === "Escape" && elements.validateModal && !elements.validateModal.classList.contains("hidden")) {
     closeValidate();
     return;
@@ -782,6 +800,58 @@ function setDmConnection(nextState) {
   }
 }
 
+function relayLabel(relay) {
+  if (!relay?.configured) return ["disabled", "Relay off"];
+  if (!relay.paired) return ["unpaired", "Relay not paired"];
+  if (!relay.roomId) return ["unassigned", "Choose relay room"];
+  const connection = relay.connection?.state || "disconnected";
+  if (connection === "connected") return ["connected", "Relay live"];
+  if (["connecting", "handshaking", "reconnecting"].includes(connection)) {
+    return ["reconnecting", "Relay connecting"];
+  }
+  return ["disconnected", "Relay offline"];
+}
+
+function renderRelayState(relay) {
+  state.relay = relay;
+  const [indicator, label] = relayLabel(relay);
+  if (elements.relayOpen) {
+    elements.relayOpen.dataset.state = indicator;
+    elements.relayOpen.textContent = label;
+  }
+  if (!elements.relaySummary) return;
+  const device = relay?.device?.name || "No paired device";
+  const room = relay?.rooms?.find((entry) => entry.id === relay.roomId);
+  elements.relaySummary.innerHTML = `
+    <strong>${escapeHtml(label)}</strong>
+    <span>${escapeHtml(device)}${room ? ` · ${escapeHtml(room.name)}` : ""}</span>`;
+  elements.relayUnconfigured?.classList.toggle("hidden", Boolean(relay?.configured));
+  elements.relayPairForm?.classList.toggle(
+    "hidden",
+    !relay?.configured || Boolean(relay?.paired),
+  );
+  elements.relayPaired?.classList.toggle("hidden", !relay?.paired);
+  if (elements.relayRoom && relay?.paired) {
+    const activeRooms = (relay.rooms || []).filter(
+      (entry) => entry.status === "active",
+    );
+    elements.relayRoom.innerHTML = activeRooms.length
+      ? activeRooms
+          .map((entry) =>
+            option(entry.id, entry.name, entry.id === relay.roomId),
+          )
+          .join("")
+      : '<option value="">Create a room in the hosted relay</option>';
+    elements.relayConnect.disabled = !activeRooms.length;
+  }
+}
+
+async function loadRelayState() {
+  const relay = await request("/api/relay/state");
+  renderRelayState(relay);
+  return relay;
+}
+
 async function connectDmStream() {
   if (state.dmStreamConnecting) return;
   state.dmStreamConnecting = true;
@@ -800,6 +870,7 @@ async function connectDmStream() {
     es.addEventListener("presence", (event) => updatePlayers(JSON.parse(event.data).players));
     es.addEventListener("reveal-set", (event) => renderRevealed(JSON.parse(event.data).items || []));
     es.addEventListener("status-set", (event) => renderTrackers(JSON.parse(event.data).trackers || []));
+    es.addEventListener("relay-state", (event) => renderRelayState(JSON.parse(event.data)));
     es.onerror = () => {
       if (state.dmStream !== es) return;
       es.close();
@@ -1007,11 +1078,12 @@ elements.trackerForm?.addEventListener("submit", async (event) => {
 
 async function syncDmChat() {
   try {
-    const { presentation, chat } = await request("/api/dm/state");
+    const { presentation, chat, relay } = await request("/api/dm/state");
     state.chatRendered.clear();
     if (elements.chatLogDm) elements.chatLogDm.innerHTML = "";
     chat.forEach(appendDmMessage);
     renderRevealed(presentation?.items || []);
+    renderRelayState(relay);
   } catch {
     /* ignore */
   }
@@ -1136,6 +1208,65 @@ elements.dmLogout?.addEventListener("click", async () => {
     await postJson("/api/dm/logout", {});
   } finally {
     window.location.reload();
+  }
+});
+
+function closeRelayModal() {
+  elements.relayModal?.classList.add("hidden");
+}
+
+elements.relayOpen?.addEventListener("click", async () => {
+  elements.relayModal?.classList.remove("hidden");
+  try {
+    await loadRelayState();
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+elements.relayClose?.addEventListener("click", closeRelayModal);
+elements.relayModal?.addEventListener("click", (event) => {
+  if (event.target === elements.relayModal) closeRelayModal();
+});
+elements.relayPairForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const relay = await postJson("/api/relay/pair", {
+      deviceName: elements.relayDeviceName.value,
+      pairingToken: elements.relayPairingToken.value,
+    });
+    elements.relayPairingToken.value = "";
+    renderRelayState(relay);
+    showToast("Device paired. Create or choose a hosted room.");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+elements.relayRefresh?.addEventListener("click", async () => {
+  try {
+    renderRelayState(await postJson("/api/relay/refresh", {}));
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+elements.relayConnect?.addEventListener("click", async () => {
+  const roomId = elements.relayRoom?.value;
+  if (!roomId) return;
+  try {
+    renderRelayState(await postJson("/api/relay/connect", { roomId }));
+    showToast("Relay room selected");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+elements.relayUnpair?.addEventListener("click", async () => {
+  if (!window.confirm("Forget this hosted relay device on this computer?")) {
+    return;
+  }
+  try {
+    renderRelayState(await postJson("/api/relay/unpair", {}));
+    showToast("Relay device removed from this cockpit");
+  } catch (error) {
+    showToast(error.message);
   }
 });
 

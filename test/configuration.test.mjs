@@ -121,14 +121,17 @@ test("documentation describes the supported security and recovery boundary", asy
     "ALLOWED_ORIGINS",
     "STATE_DIR",
     "RELAY_URL",
+    "RELAY_CONTROL_URL",
     "RELAY_AGENT_ID",
     "RELAY_ROOM_ID",
     "RELAY_DEVICE_TOKEN",
     "RELAY_HOST",
     "RELAY_PORT",
     "RELAY_STATE_FILE",
+    "RELAY_PUBLIC_ORIGIN",
     "RELAY_TLS_CERT_FILE",
     "RELAY_TLS_KEY_FILE",
+    "RELAY_BOOTSTRAP_PASSPHRASE",
   ]) {
     assert.match(example, new RegExp(`\\b${variable}\\b`));
   }

@@ -101,9 +101,48 @@ async function redeem(baseUrl, inviteToken, displayName) {
   return response.json();
 }
 
+async function adminRequest(
+  relay,
+  pathname,
+  { method = "GET", body, cookie, csrf } = {},
+) {
+  const headers = { Origin: relay.baseUrl };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  if (cookie) headers.Cookie = cookie;
+  if (csrf) headers["X-GM-Relay-CSRF"] = csrf;
+  const response = await fetch(`${relay.baseUrl}${pathname}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await response.json();
+  return { response, data };
+}
+
+async function loginAdmin(relay, email, passphrase) {
+  const { response, data } = await adminRequest(relay, "/v1/admin/login", {
+    method: "POST",
+    body: { email, passphrase },
+  });
+  assert.equal(response.status, 200);
+  return {
+    cookie: response.headers.get("set-cookie").split(";")[0],
+    csrf: data.csrfToken,
+    account: data.account,
+  };
+}
+
 test("hosted relay exposes bounded health, readiness, and player session routes", async (t) => {
   const relay = await startRelay(t);
   const created = await bootstrap(relay.store);
+
+  const page = await fetch(relay.baseUrl);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Hosted Relay/);
+  assert.match(page.headers.get("content-security-policy"), /script-src 'self'/);
+  const script = await fetch(`${relay.baseUrl}/admin.js`);
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get("content-type"), /javascript/);
 
   const health = await fetch(`${relay.baseUrl}/health`);
   assert.equal(health.status, 200);
@@ -349,4 +388,195 @@ test("WebSocket authorization and fanout remain isolated by room", async (t) => 
   );
   assert.equal(firstEvent.payload.eventType, "presence.set");
   await secondSocket.expectNoJson((message) => message.type === "event");
+});
+
+test("account sessions protect pairing and room lifecycle controls", async (t) => {
+  const relay = await startRelay(t);
+  const account = await relay.store.createAccount({
+    email: "admin@example.test",
+    passphrase: "correct horse battery staple",
+  });
+  const admin = await loginAdmin(
+    relay,
+    "admin@example.test",
+    "correct horse battery staple",
+  );
+  assert.equal(admin.account.id, account.id);
+
+  const denied = await adminRequest(relay, "/v1/admin/pairings", {
+    method: "POST",
+    body: {},
+    cookie: admin.cookie,
+  });
+  assert.equal(denied.response.status, 403);
+  assert.equal(denied.data.code, "CSRF_REJECTED");
+
+  const pairingResult = await adminRequest(relay, "/v1/admin/pairings", {
+    method: "POST",
+    body: {},
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(pairingResult.response.status, 201);
+  assert.ok(pairingResult.data.token);
+
+  const pairedResponse = await fetch(`${relay.baseUrl}/v1/devices/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pairingToken: pairingResult.data.token,
+      deviceName: "Campaign MacBook",
+    }),
+  });
+  assert.equal(pairedResponse.status, 201);
+  const paired = await pairedResponse.json();
+
+  const duplicatePairing = await fetch(`${relay.baseUrl}/v1/devices/pair`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      pairingToken: pairingResult.data.token,
+      deviceName: "Another laptop",
+    }),
+  });
+  assert.equal(duplicatePairing.status, 401);
+
+  const roomResult = await adminRequest(relay, "/v1/admin/rooms", {
+    method: "POST",
+    body: {
+      deviceId: paired.device.id,
+      name: "Worldwide Tuesday Game",
+    },
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(roomResult.response.status, 201);
+  assert.ok(roomResult.data.invite.token);
+
+  const deviceState = await fetch(`${relay.baseUrl}/v1/device/state`, {
+    headers: { Authorization: `Bearer ${paired.token}` },
+  });
+  assert.equal(deviceState.status, 200);
+  const deviceData = await deviceState.json();
+  assert.equal(deviceData.rooms[0].id, roomResult.data.room.id);
+
+  const adminState = await adminRequest(relay, "/v1/admin/state", {
+    cookie: admin.cookie,
+  });
+  assert.equal(adminState.response.status, 200);
+  const serializedAdminState = JSON.stringify(adminState.data);
+  assert.doesNotMatch(serializedAdminState, /tokenHash|passwordHash|passwordSalt/);
+  assert.doesNotMatch(serializedAdminState, new RegExp(paired.token));
+
+  const closed = await adminRequest(relay, "/v1/admin/rooms/joins", {
+    method: "POST",
+    body: { roomId: roomResult.data.room.id, joinsOpen: false },
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(closed.response.status, 200);
+  assert.equal(closed.data.room.joinsOpen, false);
+  const closedJoin = await fetch(`${relay.baseUrl}/v1/invites/redeem`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      inviteToken: roomResult.data.invite.token,
+      displayName: "Aria",
+    }),
+  });
+  assert.equal(closedJoin.status, 403);
+
+  const reopened = await adminRequest(relay, "/v1/admin/rooms/joins", {
+    method: "POST",
+    body: { roomId: roomResult.data.room.id, joinsOpen: true },
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(reopened.response.status, 200);
+  const joined = await redeem(
+    relay.baseUrl,
+    roomResult.data.invite.token,
+    "Aria",
+  );
+
+  const removed = await adminRequest(
+    relay,
+    "/v1/admin/memberships/remove",
+    {
+      method: "POST",
+      body: {
+        roomId: roomResult.data.room.id,
+        membershipId: joined.membership.id,
+      },
+      cookie: admin.cookie,
+      csrf: admin.csrf,
+    },
+  );
+  assert.equal(removed.response.status, 200);
+  assert.equal(relay.store.authenticateMembership(joined.token), null);
+
+  const rotated = await adminRequest(relay, "/v1/admin/invites/rotate", {
+    method: "POST",
+    body: { roomId: roomResult.data.room.id },
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(rotated.response.status, 201);
+  assert.notEqual(rotated.data.token, roomResult.data.invite.token);
+
+  const revoked = await adminRequest(relay, "/v1/admin/devices/revoke", {
+    method: "POST",
+    body: { deviceId: paired.device.id },
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(revoked.response.status, 200);
+  assert.ok(revoked.data.device.revokedAt);
+  const revokedState = await fetch(`${relay.baseUrl}/v1/device/state`, {
+    headers: { Authorization: `Bearer ${paired.token}` },
+  });
+  assert.equal(revokedState.status, 401);
+  assert.equal(relay.store.room(roomResult.data.room.id).status, "ended");
+});
+
+test("admin login rejects cross-origin requests and supports logout", async (t) => {
+  const relay = await startRelay(t);
+  await relay.store.createAccount({
+    email: "admin@example.test",
+    passphrase: "correct horse battery staple",
+  });
+  const crossOrigin = await fetch(`${relay.baseUrl}/v1/admin/login`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: "https://malicious.example",
+    },
+    body: JSON.stringify({
+      email: "admin@example.test",
+      passphrase: "correct horse battery staple",
+    }),
+  });
+  assert.equal(crossOrigin.status, 403);
+
+  const admin = await loginAdmin(
+    relay,
+    "admin@example.test",
+    "correct horse battery staple",
+  );
+  const session = await adminRequest(relay, "/v1/admin/session", {
+    cookie: admin.cookie,
+  });
+  assert.equal(session.response.status, 200);
+  const logout = await adminRequest(relay, "/v1/admin/logout", {
+    method: "POST",
+    body: {},
+    cookie: admin.cookie,
+    csrf: admin.csrf,
+  });
+  assert.equal(logout.response.status, 200);
+  assert.match(logout.response.headers.get("set-cookie"), /Max-Age=0/i);
+  const expired = await adminRequest(relay, "/v1/admin/session", {
+    cookie: admin.cookie,
+  });
+  assert.equal(expired.response.status, 401);
 });

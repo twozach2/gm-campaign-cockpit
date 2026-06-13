@@ -1,6 +1,9 @@
 import { randomBytes } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   encodeRelayEnvelope,
   decodeRelayEnvelope,
@@ -18,13 +21,20 @@ import {
   offeredProtocols,
   rejectUpgrade,
 } from "./websocket.mjs";
+import { RelayAccountAuth } from "./account-auth.mjs";
 
 const AGENT_PROTOCOL = "gm-campaign-cockpit-v1";
 const PLAYER_PROTOCOL = "gm-campaign-cockpit-player-v1";
+const ADMIN_COOKIE = "gm-relay-admin";
 const MAX_HTTP_BODY = 8_192;
 const MAX_CONNECTIONS = 1_000;
 const MAX_PENDING_COMMANDS = 2_000;
 const COMMAND_TIMEOUT_MS = 15_000;
+const defaultPublicRoot = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "public",
+);
 
 function identifier(prefix) {
   return `${prefix}_${randomBytes(18).toString("base64url")}`;
@@ -86,11 +96,39 @@ function exactObject(value, keys, label) {
   return value;
 }
 
+function requiredString(value, label, max) {
+  const result = typeof value === "string" ? value.trim() : "";
+  if (!result || result.length > max) {
+    throw requestError(`${label} is invalid`);
+  }
+  return result;
+}
+
+function optionalInteger(value, label, { min, max }) {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < min || value > max) {
+    throw requestError(`${label} is invalid`);
+  }
+  return value;
+}
+
 function bearer(request) {
   const match = String(request.headers.authorization || "").match(
     /^Bearer\s+(.+)$/i,
   );
   return match?.[1] || "";
+}
+
+function cookies(request) {
+  const result = {};
+  for (const part of String(request.headers.cookie || "").split(";")) {
+    const separator = part.indexOf("=");
+    if (separator === -1) continue;
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (name) result[name] = decodeURIComponent(value);
+  }
+  return result;
 }
 
 function protocolToken(request) {
@@ -140,6 +178,38 @@ function securityHeaders(response) {
   response.setHeader("Cross-Origin-Resource-Policy", "same-origin");
 }
 
+const staticFiles = new Map([
+  ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/admin.js", ["admin.js", "text/javascript; charset=utf-8"]],
+  ["/styles.css", ["styles.css", "text/css; charset=utf-8"]],
+]);
+
+function accountCookie(token, secure) {
+  return [
+    `${ADMIN_COOKIE}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    secure ? "Secure" : null,
+    "Max-Age=86400",
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
+function clearAccountCookie(secure) {
+  return [
+    `${ADMIN_COOKIE}=`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    secure ? "Secure" : null,
+    "Max-Age=0",
+  ]
+    .filter(Boolean)
+    .join("; ");
+}
+
 export class HostedRelayService {
   constructor({
     store,
@@ -150,6 +220,9 @@ export class HostedRelayService {
     heartbeatMs = 25_000,
     commandTimeoutMs = COMMAND_TIMEOUT_MS,
     maxMessageBytes = RELAY_MAX_MESSAGE_BYTES,
+    publicOrigin,
+    accountAuth,
+    publicRoot = defaultPublicRoot,
     now = () => Date.now(),
     randomId = identifier,
   }) {
@@ -163,6 +236,14 @@ export class HostedRelayService {
     this.maxMessageBytes = maxMessageBytes;
     this.now = now;
     this.randomId = randomId;
+    this.publicOrigin = publicOrigin ? new URL(publicOrigin).origin : null;
+    this.accountAuth =
+      accountAuth ||
+      new RelayAccountAuth({
+        store,
+        now,
+      });
+    this.publicRoot = path.resolve(publicRoot);
     this.ready = false;
     this.server = null;
     this.agents = new Map();
@@ -243,6 +324,9 @@ export class HostedRelayService {
     let url;
     try {
       url = new URL(request.url, `http://${request.headers.host || "relay"}`);
+      if (request.method === "GET" && staticFiles.has(url.pathname)) {
+        return this.serveStatic(response, url.pathname);
+      }
       if (request.method === "GET" && url.pathname === "/health") {
         return json(response, 200, { ok: true });
       }
@@ -251,6 +335,213 @@ export class HostedRelayService {
           ready: this.ready,
           checks: { persistence: this.ready ? "ready" : "unavailable" },
         });
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/session") {
+        const session = this.adminSession(request);
+        if (!session) {
+          return json(response, 401, { error: "Account login required" });
+        }
+        return json(response, 200, session);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/login") {
+        this.requireSameOrigin(request);
+        const body = exactObject(
+          await readJson(request),
+          ["email", "passphrase"],
+          "Account login",
+        );
+        const authenticated = this.accountAuth.login(
+          requiredString(body.email, "Email", 320),
+          requiredString(body.passphrase, "Passphrase", 512),
+        );
+        if (!authenticated) {
+          return json(response, 401, { error: "Invalid account credentials" });
+        }
+        return json(
+          response,
+          200,
+          {
+            account: authenticated.account,
+            session: authenticated.session,
+            csrfToken: authenticated.csrfToken,
+          },
+          {
+            "Set-Cookie": accountCookie(
+              authenticated.token,
+              this.secureCookies(request),
+            ),
+          },
+        );
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/logout") {
+        const session = this.requireAdminMutation(request);
+        this.accountAuth.revoke(session.token);
+        return json(
+          response,
+          200,
+          { ok: true },
+          {
+            "Set-Cookie": clearAccountCookie(this.secureCookies(request)),
+          },
+        );
+      }
+      if (request.method === "GET" && url.pathname === "/v1/admin/state") {
+        const session = this.requireAdmin(request);
+        return json(response, 200, this.adminState(session.account.id));
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/pairings") {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["ttlMs"],
+          "Device pairing",
+        );
+        const pairing = await this.store.createPairing({
+          accountId: session.account.id,
+          ttlMs:
+            optionalInteger(body.ttlMs, "Pairing lifetime", {
+              min: 60_000,
+              max: 3_600_000,
+            }) ?? 10 * 60 * 1_000,
+        });
+        return json(response, 201, pairing);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/devices/pair") {
+        this.rejectCrossOrigin(request);
+        const body = exactObject(
+          await readJson(request),
+          ["pairingToken", "deviceName"],
+          "Device pairing redemption",
+        );
+        const paired = await this.store.redeemPairing({
+          token: requiredString(body.pairingToken, "Pairing token", 512),
+          name: requiredString(body.deviceName, "Device name", 80),
+        });
+        return json(response, 201, paired);
+      }
+      if (request.method === "GET" && url.pathname === "/v1/device/state") {
+        const device = this.store.authenticateDevice(bearer(request));
+        if (!device) {
+          return json(response, 401, { error: "Device session required" });
+        }
+        return json(response, 200, {
+          device,
+          rooms: this.store
+            .rooms(device.accountId)
+            .filter((room) => room.agentDeviceId === device.id),
+        });
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/admin/devices/revoke"
+      ) {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["deviceId"],
+          "Device revocation",
+        );
+        const device = await this.store.revokeDevice(
+          session.account.id,
+          requiredString(body.deviceId, "Device ID", 128),
+        );
+        this.disconnectDevice(device.id);
+        return json(response, 200, { device });
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/rooms") {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["deviceId", "name"],
+          "Room creation",
+        );
+        const room = await this.store.createRoom({
+          accountId: session.account.id,
+          agentDeviceId: requiredString(body.deviceId, "Device ID", 128),
+          name: requiredString(body.name, "Room name", 120),
+        });
+        const invite = await this.store.createInvite({ roomId: room.id });
+        return json(response, 201, { room, invite });
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/admin/rooms/joins"
+      ) {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["roomId", "joinsOpen"],
+          "Room join control",
+        );
+        const room = await this.store.setRoomJoins(
+          session.account.id,
+          requiredString(body.roomId, "Room ID", 128),
+          body.joinsOpen,
+        );
+        this.sendMembership(room.id);
+        return json(response, 200, { room });
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/admin/rooms/end"
+      ) {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["roomId"],
+          "Room ending",
+        );
+        const room = await this.store.endRoom(
+          session.account.id,
+          requiredString(body.roomId, "Room ID", 128),
+        );
+        this.disconnectRoom(room.id, "Room ended");
+        return json(response, 200, { room });
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/admin/invites/rotate"
+      ) {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["roomId", "ttlMs", "maxUses"],
+          "Invite rotation",
+        );
+        const invite = await this.store.rotateInvite(
+          session.account.id,
+          requiredString(body.roomId, "Room ID", 128),
+          {
+            ttlMs: optionalInteger(body.ttlMs, "Invite lifetime", {
+              min: 60_000,
+              max: 30 * 24 * 60 * 60 * 1_000,
+            }),
+            maxUses: optionalInteger(body.maxUses, "Invite use limit", {
+              min: 1,
+              max: 1_000,
+            }),
+          },
+        );
+        return json(response, 201, invite);
+      }
+      if (
+        request.method === "POST" &&
+        url.pathname === "/v1/admin/memberships/remove"
+      ) {
+        const session = this.requireAdminMutation(request);
+        const body = exactObject(
+          await readJson(request),
+          ["roomId", "membershipId"],
+          "Membership removal",
+        );
+        const membership = await this.store.removeMembership(
+          session.account.id,
+          requiredString(body.roomId, "Room ID", 128),
+          requiredString(body.membershipId, "Membership ID", 128),
+        );
+        this.disconnectMembership(membership.id);
+        this.sendMembership(membership.roomId);
+        return json(response, 200, { membership });
       }
       if (request.method === "POST" && url.pathname === "/v1/invites/redeem") {
         const body = exactObject(
@@ -300,6 +591,122 @@ export class HostedRelayService {
         error: status >= 500 ? "Internal server error" : error.message,
         ...(status < 500 && error.code ? { code: error.code } : {}),
       });
+    }
+  }
+
+  async serveStatic(response, pathname) {
+    const [filename, contentType] = staticFiles.get(pathname);
+    const content = await readFile(path.join(this.publicRoot, filename));
+    response.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    );
+    response.writeHead(200, {
+      "Content-Type": contentType,
+      "Content-Length": content.length,
+      "Cache-Control": "no-store",
+    });
+    response.end(content);
+  }
+
+  expectedOrigin(request) {
+    if (this.publicOrigin) return this.publicOrigin;
+    const protocol = this.tls ? "https" : "http";
+    return new URL(
+      `${protocol}://${request.headers.host || `${this.host}:${this.port}`}`,
+    ).origin;
+  }
+
+  rejectCrossOrigin(request) {
+    const origin = request.headers.origin;
+    if (origin && origin !== this.expectedOrigin(request)) {
+      throw requestError("Cross-origin request rejected", 403, "ORIGIN_REJECTED");
+    }
+  }
+
+  requireSameOrigin(request) {
+    const origin = request.headers.origin;
+    if (!origin || origin !== this.expectedOrigin(request)) {
+      throw requestError("Same-origin request required", 403, "ORIGIN_REQUIRED");
+    }
+  }
+
+  secureCookies(request) {
+    return (
+      this.tls ||
+      this.publicOrigin?.startsWith("https://") ||
+      String(request.headers["x-forwarded-proto"] || "") === "https"
+    );
+  }
+
+  adminToken(request) {
+    return cookies(request)[ADMIN_COOKIE] || "";
+  }
+
+  adminSession(request) {
+    return this.accountAuth.authenticate(this.adminToken(request));
+  }
+
+  requireAdmin(request) {
+    const session = this.adminSession(request);
+    if (!session) {
+      throw requestError("Account login required", 401, "ACCOUNT_REQUIRED");
+    }
+    return session;
+  }
+
+  requireAdminMutation(request) {
+    this.requireSameOrigin(request);
+    const token = this.adminToken(request);
+    const session = this.requireAdmin(request);
+    if (
+      !this.accountAuth.verifyCsrf(
+        token,
+        request.headers["x-gm-relay-csrf"],
+      )
+    ) {
+      throw requestError("Invalid CSRF token", 403, "CSRF_REJECTED");
+    }
+    return { ...session, token };
+  }
+
+  adminState(accountId) {
+    return {
+      account: this.store.account(accountId),
+      devices: this.store.devices(accountId),
+      rooms: this.store.rooms(accountId).map((room) => ({
+        ...room,
+        invites: this.store.invites(room.id),
+        memberships: this.store.memberships(room.id),
+        agentConnected: this.agents.has(room.id),
+        playerConnections: this.players.get(room.id)?.size || 0,
+      })),
+    };
+  }
+
+  disconnectDevice(deviceId) {
+    for (const [roomId, session] of this.agents) {
+      if (session.device.id === deviceId) {
+        session.connection.close(4003, "Device revoked");
+        this.disconnectRoom(roomId, "Device revoked");
+      }
+    }
+  }
+
+  disconnectRoom(roomId, reason) {
+    this.agents.get(roomId)?.connection.close(4004, reason);
+    for (const session of this.players.get(roomId) || []) {
+      session.connection.close(4004, reason);
+    }
+  }
+
+  disconnectMembership(membershipId) {
+    for (const roomPlayers of this.players.values()) {
+      for (const session of roomPlayers) {
+        if (session.membership.id === membershipId) {
+          session.connection.close(4003, "Membership revoked");
+        }
+      }
     }
   }
 

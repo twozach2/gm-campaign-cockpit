@@ -162,6 +162,26 @@ select {
   background: #ff5680;
 }
 
+.connection-state[data-state="unassigned"]::before,
+.connection-state[data-state="unpaired"]::before {
+  background: var(--amber);
+}
+
+.connection-state[data-state="disabled"]::before {
+  background: var(--faint);
+}
+
+.relay-state-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.relay-state-button:hover {
+  color: var(--text);
+}
+
 .auth-overlay {
   position: fixed;
   inset: 0;
@@ -1027,6 +1047,58 @@ body.resizing-row {
 .modal-header h2 {
   margin: 2px 0 0;
   font-size: 17px;
+}
+
+.relay-card {
+  width: min(620px, 100%);
+}
+
+.relay-body {
+  padding: 20px;
+  overflow: auto;
+}
+
+.relay-summary,
+.relay-panel {
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.relay-summary {
+  margin-bottom: 14px;
+}
+
+.relay-summary strong,
+.relay-summary span {
+  display: block;
+}
+
+.relay-summary span {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.relay-panel h3 {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.relay-panel p {
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.relay-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.danger-text {
+  color: #ff8fab;
 }
 
 .validate-body {

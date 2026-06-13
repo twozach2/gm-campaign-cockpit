@@ -14,13 +14,24 @@ if (!email) {
     'Usage: npm run relay:bootstrap -- "dm@example.com" "Device name" "Room name"',
   );
 }
+const passphrase = process.env.RELAY_BOOTSTRAP_PASSPHRASE;
+if (!passphrase) {
+  throw new Error(
+    "RELAY_BOOTSTRAP_PASSPHRASE is required to create an account login",
+  );
+}
 const stateFile = path.resolve(
   process.env.RELAY_STATE_FILE || path.join(relayRoot, "data", "relay.json"),
 );
 const store = new RelayStore({ file: stateFile });
 await store.init();
 try {
-  const created = await store.bootstrap({ email, deviceName, roomName });
+  const created = await store.bootstrap({
+    email,
+    passphrase,
+    deviceName,
+    roomName,
+  });
   process.stdout.write(
     `${JSON.stringify(
       {

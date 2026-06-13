@@ -15,6 +15,7 @@ yarn-error.log*
 # Session notes backups are user-specific and machine-local.
 data/backups/
 data/trackers.json
+data/relay-device.json
 data/*.corrupt
 data/*.bak
 data/*.tmp

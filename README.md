@@ -261,12 +261,34 @@ are omitted until the separate opaque asset-upload service is implemented.
 
 Create a development account, device, room, and invite:
 
-```bash
+```powershell
+$env:RELAY_BOOTSTRAP_PASSPHRASE = "choose-a-long-account-passphrase"
 npm run relay:bootstrap -- "dm@example.com" "Campaign laptop" "Tuesday table"
 ```
 
-The command prints the device token, room ID, and invite token once. Configure
-the local cockpit connector with the returned values:
+On macOS or Linux, use
+`export RELAY_BOOTSTRAP_PASSPHRASE="choose-a-long-account-passphrase"`.
+The command prints the device token, room ID, and invite token once.
+
+Open the relay root URL in a browser and sign in with the email and passphrase.
+The account dashboard can generate one-time device pairing codes, list and
+revoke devices, create and end rooms, open or close joins, rotate invites, and
+remove players.
+
+For the normal pairing flow, configure only the relay's public control origin
+in the local cockpit:
+
+```text
+RELAY_CONTROL_URL=https://relay.example.com
+```
+
+Open **Hosted relay** in the local cockpit header, redeem a pairing code, then
+choose a room assigned to that device. The device token is written to
+`STATE_DIR/relay-device.json` with restricted file permissions and is never
+returned to the browser.
+
+The original environment-managed connector remains available for development
+or managed installations:
 
 ```text
 RELAY_URL=wss://relay.example.com/v1/agent/<room-id>
@@ -286,23 +308,26 @@ Development defaults are `127.0.0.1:8787` and
 `relay/data/relay.json`. Configure `RELAY_STATE_FILE` for durable storage.
 Public traffic requires HTTPS/WSS: either configure both
 `RELAY_TLS_CERT_FILE` and `RELAY_TLS_KEY_FILE`, or put the relay behind a
-trusted managed TLS proxy. The local cockpit server remains private and opens
-no inbound internet connection.
+trusted managed TLS proxy. When using a proxy, set
+`RELAY_PUBLIC_ORIGIN=https://relay.example.com` so same-origin and secure-cookie
+checks use the external origin. The local cockpit server remains private and
+opens no inbound internet connection.
 
 Available service boundaries:
 
 - `GET /health` and `GET /readiness`
 - `POST /v1/invites/redeem`
 - `GET /v1/player/session`
+- Account-session and room-control routes under `/v1/admin/`
+- `POST /v1/devices/pair` and `GET /v1/device/state`
 - `WS /v1/agent/<room-id>`
 - `WS /v1/player/<room-id>`
 
 There is no production hosted relay bundled with this repository yet. Before
-public use, this skeleton still needs browser account sign-in, device pairing
-and revocation controls, a remote player UI, an asset service, a production
-database and backups, stronger deployment limits, monitoring, and a dedicated
-security review. Local and trusted-LAN modes remain the supported ways to run
-a session.
+public use, this skeleton still needs a remote player UI, an asset service, a
+production database and backups, stronger deployment limits, monitoring, and a
+dedicated security review. Local and trusted-LAN modes remain the supported
+ways to run a session.
 
 ## Validation
 
