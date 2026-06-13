@@ -22,9 +22,14 @@ import {
   operationalError,
 } from "./lib/logger.mjs";
 import { TokenBucketRateLimiter } from "./lib/rate-limit.mjs";
+import { RelayConnector } from "./lib/relay-connector.mjs";
+import { RelayRoomBridge } from "./lib/relay-room-bridge.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import {
+  createRelayRoomState,
+  messageForRelay,
   messageVisibleToAudience,
+  presentationForRelay,
   trackerStateForAudience,
 } from "./lib/room-projection.mjs";
 import { Vault } from "./lib/vault.mjs";
@@ -93,6 +98,18 @@ const MAX_FILE_BYTES = positiveIntegerEnv(
   25 * 1024 * 1024,
 );
 const MAX_LIMITER_KEYS = positiveIntegerEnv("MAX_LIMITER_KEYS", 2_000);
+const RELAY_URL = String(process.env.RELAY_URL || "").trim();
+const RELAY_AGENT_ID = String(process.env.RELAY_AGENT_ID || "").trim();
+const RELAY_ROOM_ID = String(process.env.RELAY_ROOM_ID || "").trim();
+const RELAY_DEVICE_TOKEN = String(
+  process.env.RELAY_DEVICE_TOKEN || "",
+).trim();
+const RELAY_APP_VERSION = String(
+  process.env.RELAY_APP_VERSION || "0.1.0",
+).trim();
+const RELAY_ENABLED = Boolean(
+  RELAY_URL || RELAY_AGENT_ID || RELAY_ROOM_ID || RELAY_DEVICE_TOKEN,
+);
 const STATE_CHANGING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const SECURITY_HEADERS = {
   "Content-Security-Policy":
@@ -147,6 +164,28 @@ if (REMOTE_BINDING && TABLE_PIN.length < 6) {
     "TABLE_PIN must be at least 6 characters when remote DM access is enabled.",
   );
 }
+if (RELAY_ENABLED) {
+  for (const [name, value] of Object.entries({
+    RELAY_URL,
+    RELAY_AGENT_ID,
+    RELAY_ROOM_ID,
+    RELAY_DEVICE_TOKEN,
+  })) {
+    if (!value) throw new Error(`${name} is required when relay mode is configured`);
+  }
+  const relayUrl = new URL(RELAY_URL);
+  if (relayUrl.protocol !== "wss:") {
+    throw new Error("RELAY_URL must use wss://");
+  }
+  if (relayUrl.username || relayUrl.password || relayUrl.search) {
+    throw new Error("RELAY_URL must not contain credentials or query parameters");
+  }
+  if (typeof globalThis.WebSocket !== "function") {
+    throw new Error(
+      "Relay mode requires a current Node.js LTS release with WebSocket support",
+    );
+  }
+}
 
 const presentation = {
   items: [],
@@ -154,6 +193,8 @@ const presentation = {
 };
 const chat = [];
 const clients = new Set();
+const relayRoom = new RelayRoomBridge();
+let relayConnector = null;
 const playerSessions = new SessionRegistry({
   maxPlayers: MAX_PLAYERS,
   maxTickets: MAX_STREAM_TICKETS,
@@ -280,11 +321,17 @@ async function emitStatus() {
   for (const client of clients) {
     writeEvent(client, "status-set", statusFor(client.role));
   }
+  publishRelayEvent("status.set", { kind: "all" }, {
+    status: statusFor("player"),
+  });
 }
 
 function emitPresentation() {
   presentation.updatedAt = Date.now();
   broadcast("reveal-set", presentation);
+  publishRelayEvent("reveal.set", { kind: "all" }, {
+    presentation: presentationForRelay(presentation),
+  });
 }
 
 function makeItem(type, fields) {
@@ -357,6 +404,36 @@ function executeRoll(parts) {
   return { expr, parts: rolled, total };
 }
 
+function submitChat({ role, player, text, whisper = false }) {
+  const isDm = role === "dm";
+  const from = isDm ? "DM" : player.displayName;
+  const identity = player ? { fromPlayerId: player.playerId } : {};
+  const isWhisper = Boolean(whisper) && !isDm;
+  const command = text.trim().match(/^\/(s?roll|r)(?:\s+(.*))?$/i);
+  if (command) {
+    const secret = command[1].toLowerCase() === "sroll";
+    if (secret && !isDm) {
+      reject(403, "Only the DM can make secret rolls");
+    }
+    const parts = parseRoll(command[2]);
+    if (!parts) {
+      reject(400, "Could not read that roll - try /roll 2d6+3");
+    }
+    const scope = secret ? "secret" : isWhisper ? "whisper" : "table";
+    return pushChat({
+      scope,
+      from,
+      ...identity,
+      ...(scope === "whisper" ? { to: "DM" } : {}),
+      type: "roll",
+      roll: executeRoll(parts),
+    });
+  }
+  return isWhisper
+    ? pushChat({ scope: "whisper", from, ...identity, to: "DM", text })
+    : pushChat({ scope: "table", from, ...identity, text });
+}
+
 function broadcast(eventName, payload, message) {
   for (const client of clients) {
     if (message && !visibleToClient(client, message)) continue;
@@ -414,17 +491,84 @@ function pushChat(message) {
   message.ts = Date.now();
   chat.push(message);
   broadcast(message.scope === "whisper" ? "whisper" : "chat", message, message);
+  const relayMessage = messageForRelay(message);
+  const audience = relayRoom.audienceForMessage(message);
+  if (relayMessage && audience) {
+    publishRelayEvent("chat.append", audience, { message: relayMessage });
+  }
   return message;
 }
 
 function connectedPlayers() {
-  const players = new Map();
+  const players = [];
   for (const client of clients) {
     if (client.role !== "player" || !client.playerId) continue;
     const player = playerSessions.get(client.playerId);
-    if (player) players.set(player.playerId, player);
+    if (player && !players.some((entry) => entry.playerId === player.playerId)) {
+      players.push(player);
+    }
   }
-  return [...players.values()];
+  return relayRoom.combinedPlayers(players);
+}
+
+function publishRelayEvent(eventType, audience, data) {
+  if (!relayConnector) return;
+  try {
+    relayConnector.publishEvent(eventType, audience, data);
+  } catch (error) {
+    logger.warn("relay_publish_rejected", {
+      eventType,
+      reason: error.code || "INVALID_RELAY_EVENT",
+    });
+  }
+}
+
+function broadcastPresence() {
+  const players = connectedPlayers();
+  broadcast("presence", { players });
+  publishRelayEvent("presence.set", { kind: "all" }, { players });
+}
+
+async function handleRelayCommand(command) {
+  return relayRoom.handleCommand(command, {
+    submitChat,
+    onPresence: broadcastPresence,
+  });
+}
+
+async function handleRelayMembership(membership) {
+  relayRoom.applyMembership(membership);
+  broadcastPresence();
+}
+
+function relaySnapshot() {
+  return createRelayRoomState({
+    presentation,
+    status,
+    chat,
+    players: connectedPlayers(),
+    relayPlayerIds: relayRoom.playerIds(),
+  });
+}
+
+if (RELAY_ENABLED) {
+  relayConnector = new RelayConnector({
+    url: RELAY_URL,
+    token: RELAY_DEVICE_TOKEN,
+    agentId: RELAY_AGENT_ID,
+    roomId: RELAY_ROOM_ID,
+    appVersion: RELAY_APP_VERSION,
+    getSnapshot: relaySnapshot,
+    handleCommand: handleRelayCommand,
+    handleMembership: handleRelayMembership,
+    logger,
+    onStateChange: (relayStatus) => {
+      logger.info("relay_state", {
+        state: relayStatus.state,
+        revision: relayStatus.revision,
+      });
+    },
+  });
 }
 
 setInterval(() => {
@@ -827,7 +971,7 @@ async function api(request, response, url) {
       authorization.token,
       body.displayName,
     );
-    broadcast("presence", { players: connectedPlayers() });
+    broadcastPresence();
     return sendJson(response, 200, { player });
   }
 
@@ -839,7 +983,7 @@ async function api(request, response, url) {
         clients.delete(client);
       }
     }
-    broadcast("presence", { players: connectedPlayers() });
+    broadcastPresence();
     logger.info("player_left", {
       registeredPlayers: playerSessions.players.size,
     });
@@ -918,14 +1062,14 @@ async function api(request, response, url) {
     });
     writeEvent(client, "reveal-set", presentation);
     writeEvent(client, "status-set", statusFor(client.role));
-    broadcast("presence", { players: connectedPlayers() });
+    broadcastPresence();
     request.on("close", () => {
       clients.delete(client);
       logger.info("stream_disconnected", {
         role: client.role,
         activeStreams: clients.size,
       });
-      broadcast("presence", { players: connectedPlayers() });
+      broadcastPresence();
     });
     return;
   }
@@ -969,37 +1113,12 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/chat") {
-    const text = body.text;
-    const player = authorization.player;
-    const isDm = authorization.role === "dm";
-    const from = isDm ? "DM" : player.displayName;
-    const identity = player ? { fromPlayerId: player.playerId } : {};
-    const whisper = Boolean(body.whisper) && !isDm;
-    const command = text.trim().match(/^\/(s?roll|r)(?:\s+(.*))?$/i);
-    if (command) {
-      const secret = command[1].toLowerCase() === "sroll";
-      if (secret && !isDm) {
-        return sendJson(response, 403, { error: "Only the DM can make secret rolls" });
-      }
-      const parts = parseRoll(command[2]);
-      if (!parts) {
-        return sendJson(response, 400, { error: "Could not read that roll — try /roll 2d6+3" });
-      }
-      const roll = executeRoll(parts);
-      const scope = secret ? "secret" : whisper ? "whisper" : "table";
-      const message = pushChat({
-        scope,
-        from,
-        ...identity,
-        ...(scope === "whisper" ? { to: "DM" } : {}),
-        type: "roll",
-        roll,
-      });
-      return sendJson(response, 200, { message });
-    }
-    const message = whisper
-      ? pushChat({ scope: "whisper", from, ...identity, to: "DM", text })
-      : pushChat({ scope: "table", from, ...identity, text });
+    const message = submitChat({
+      role: authorization.role,
+      player: authorization.player,
+      text: body.text,
+      whisper: body.whisper,
+    });
     return sendJson(response, 200, { message });
   }
 
@@ -1073,7 +1192,9 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/whisper") {
-    const player = playerSessions.get(body.toPlayerId);
+    const player =
+      playerSessions.get(body.toPlayerId) ||
+      relayRoom.getPlayer(body.toPlayerId);
     const text = body.text;
     if (!player) {
       return sendJson(response, 404, { error: "Player not found" });
@@ -1340,6 +1461,7 @@ async function shutdown(signal) {
   }, 5_000);
 
   try {
+    relayConnector?.stop();
     closeStreams();
     await closeHttpServer();
     await Promise.all([trackerStore.close(), vault.flushWrites()]);
@@ -1392,6 +1514,8 @@ try {
   });
 }
 
+relayConnector?.start();
+
 server.listen(port, host, () => {
   const lan = lanAddress();
   if (REMOTE_BINDING) {
@@ -1403,6 +1527,7 @@ server.listen(port, host, () => {
     mode: REMOTE_BINDING ? "lan" : "local",
     localDmAccess: ALLOW_LOCAL_DM,
     remoteDmAccess: ALLOW_REMOTE_DM,
+    relayEnabled: RELAY_ENABLED,
     ready: readiness.persistence && readiness.vault,
     dmUrl: `http://${host}:${port}`,
     playerUrl: `http://${lan}:${port}/player.html`,

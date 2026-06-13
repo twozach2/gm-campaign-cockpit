@@ -283,6 +283,24 @@ test("relay room projection strips local metadata and private state", () => {
         type: "roll",
         roll: { total: 20 },
       },
+      {
+        id: 3,
+        ts: now,
+        scope: "whisper",
+        from: "Local",
+        fromPlayerId: "local-1",
+        to: "DM",
+        text: "LAN only",
+      },
+      {
+        id: 4,
+        ts: now,
+        scope: "whisper",
+        from: "Remote",
+        fromPlayerId: "player-1",
+        to: "DM",
+        text: "Hosted",
+      },
     ],
     players: [
       {
@@ -292,10 +310,14 @@ test("relay room projection strips local metadata and private state", () => {
         lastSeenAt: now,
       },
     ],
+    relayPlayerIds: ["player-1"],
   });
 
   assert.equal(projected.status.trackers.length, 1);
-  assert.equal(projected.chat.length, 1);
+  assert.deepEqual(
+    projected.chat.map((message) => message.id),
+    [1, 4],
+  );
   assert.deepEqual(projected.players, [
     { playerId: "player-1", displayName: "Aria" },
   ]);
@@ -316,29 +338,27 @@ test("relay room projection strips local metadata and private state", () => {
   assert.doesNotMatch(JSON.stringify(projected), /Private Campaign|secret\.png|tokenHash/);
 });
 
-test("relay image projection refuses filesystem-backed reveals", () => {
-  assert.throws(
-    () =>
-      createRelayRoomState({
-        presentation: {
-          items: [
-            {
-              id: 1,
-              type: "image",
-              ts: now,
-              title: "Map",
-              campaign: "Private Campaign",
-              file: "Maps/secret.png",
-            },
-          ],
-          updatedAt: now,
+test("relay image projection omits filesystem-backed reveals", () => {
+  const projected = createRelayRoomState({
+    presentation: {
+      items: [
+        {
+          id: 1,
+          type: "image",
+          ts: now,
+          title: "Map",
+          campaign: "Private Campaign",
+          file: "Maps/secret.png",
         },
-        status: { trackers: [], updatedAt: now },
-        chat: [],
-        players: [],
-      }),
-    /opaque assetId/,
-  );
+      ],
+      updatedAt: now,
+    },
+    status: { trackers: [], updatedAt: now },
+    chat: [],
+    players: [],
+  });
+  assert.deepEqual(projected.presentation.items, []);
+  assert.doesNotMatch(JSON.stringify(projected), /Private Campaign|secret\.png/);
 });
 
 test("audience projections isolate hidden trackers and whispers", () => {

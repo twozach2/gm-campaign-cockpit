@@ -243,6 +243,22 @@ identifiers, whispers, notes, campaign contents, and filesystem paths.
 These controls reduce risk on a trusted LAN. They do not replace TLS, public
 identity, tenant isolation, a cloud database, or an internet-facing gateway.
 
+## Experimental Hosted Relay
+
+The Phase Two connector is disabled unless `RELAY_URL`, `RELAY_AGENT_ID`,
+`RELAY_ROOM_ID`, and `RELAY_DEVICE_TOKEN` are all configured. It opens one
+outbound `wss://` connection and does not make the local HTTP server public.
+
+The connector publishes only player-safe room projections: explicit text/card
+reveals, visible trackers, scoped chat, and public player identities. Vault
+paths, campaign manuscripts, session notes, local credentials, hidden trackers,
+and secret rolls are rejected at the protocol boundary. Local image reveals
+are omitted until the separate opaque asset-upload service is implemented.
+
+There is no production hosted relay bundled with this repository yet. These
+settings are for protocol and connector development; local and trusted-LAN
+modes remain the supported ways to run a session.
+
 ## Validation
 
 Run the document validator:
@@ -281,4 +297,4 @@ npm run check
 
 The automated suite covers saves, persistence, authentication, authorization,
 origin and CSRF checks, player identity, rate limits, resource bounds, file
-exposure, recovery, logging, and configuration.
+exposure, recovery, logging, configuration, and the hosted-relay protocol.

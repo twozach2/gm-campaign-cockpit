@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import {
   mkdtemp,
   readFile,
@@ -20,6 +22,29 @@ const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 
 function localPath(file) {
   return path.join(repoRoot, file);
+}
+
+async function rejectedStartup(env) {
+  const child = spawn(process.execPath, [localPath("server.mjs")], {
+    env: {
+      ...process.env,
+      RELAY_URL: "",
+      RELAY_AGENT_ID: "",
+      RELAY_ROOM_ID: "",
+      RELAY_DEVICE_TOKEN: "",
+      ...env,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => {
+    output += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    output += chunk;
+  });
+  const [code] = await once(child, "exit");
+  return { code, output };
 }
 
 test("local environment file loads defaults without replacing shell values", async (t) => {
@@ -90,10 +115,42 @@ test("documentation describes the supported security and recovery boundary", asy
     "ALLOW_LOCAL_DM",
     "ALLOWED_ORIGINS",
     "STATE_DIR",
+    "RELAY_URL",
+    "RELAY_AGENT_ID",
+    "RELAY_ROOM_ID",
+    "RELAY_DEVICE_TOKEN",
   ]) {
     assert.match(example, new RegExp(`\\b${variable}\\b`));
   }
   assert.doesNotMatch(readme, /prints? (?:the )?(?:table )?pin/i);
+  assert.match(readme, /outbound `wss:\/\/` connection/i);
+  assert.match(readme, /no production hosted relay bundled/i);
+});
+
+test("relay configuration fails closed unless it is complete and secure", async () => {
+  const incomplete = await rejectedStartup({
+    RELAY_URL: "wss://relay.example.test/agent",
+  });
+  assert.notEqual(incomplete.code, 0);
+  assert.match(incomplete.output, /RELAY_AGENT_ID is required/);
+
+  const insecure = await rejectedStartup({
+    RELAY_URL: "ws://relay.example.test/agent",
+    RELAY_AGENT_ID: "agent-1",
+    RELAY_ROOM_ID: "room-1",
+    RELAY_DEVICE_TOKEN: "relay-device-token-123456",
+  });
+  assert.notEqual(insecure.code, 0);
+  assert.match(insecure.output, /must use wss:\/\//);
+
+  const querySecret = await rejectedStartup({
+    RELAY_URL: "wss://relay.example.test/agent?token=secret",
+    RELAY_AGENT_ID: "agent-1",
+    RELAY_ROOM_ID: "room-1",
+    RELAY_DEVICE_TOKEN: "relay-device-token-123456",
+  });
+  assert.notEqual(querySecret.code, 0);
+  assert.match(querySecret.output, /must not contain credentials or query/);
 });
 
 test("STATE_DIR controls tracker persistence", async (t) => {
