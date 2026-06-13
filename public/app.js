@@ -3,6 +3,7 @@ import {
   createNotesSaveCoordinator,
   selectInitialSession,
 } from "/notes-save.mjs";
+import { openTicketedEventSource } from "/stream-connection.mjs";
 
 const state = {
   campaigns: [],
@@ -23,6 +24,7 @@ const state = {
   initEditing: new Set(),
   dmStreamConnecting: false,
   dmStreamReconnect: null,
+  dmStreamStatus: "connecting",
   dmCsrfToken: null,
 };
 
@@ -78,6 +80,7 @@ const elements = {
   dmLoginPin: document.querySelector("#dm-login-pin"),
   dmLoginError: document.querySelector("#dm-login-error"),
   dmLogout: document.querySelector("#dm-logout"),
+  dmConnection: document.querySelector("#dm-connection"),
 };
 
 async function request(url, options = {}) {
@@ -410,7 +413,7 @@ function renderSaveState() {
     return;
   }
   if (state.notesSaveError) {
-    elements.saveState.textContent = "Save failed - retrying";
+    elements.saveState.textContent = "Save failed - notes remain unsaved";
     return;
   }
   if (state.notesDirty) {
@@ -754,21 +757,44 @@ function updatePlayers(players) {
 
 function scheduleDmReconnect() {
   clearTimeout(state.dmStreamReconnect);
+  setDmConnection("reconnecting");
   state.dmStreamReconnect = setTimeout(() => {
     connectDmStream();
   }, 1000);
+}
+
+function setDmConnection(nextState) {
+  const previous = state.dmStreamStatus;
+  state.dmStreamStatus = nextState;
+  if (elements.dmConnection) {
+    elements.dmConnection.dataset.state = nextState;
+    elements.dmConnection.textContent =
+      nextState === "connected"
+        ? "Live"
+        : nextState === "reconnecting"
+          ? "Reconnecting"
+          : nextState === "disconnected"
+            ? "Offline"
+            : "Connecting";
+  }
+  if (nextState === "reconnecting" && previous === "connected") {
+    showToast("Live connection lost - reconnecting");
+  }
 }
 
 async function connectDmStream() {
   if (state.dmStreamConnecting) return;
   state.dmStreamConnecting = true;
   if (state.dmStream) state.dmStream.close();
+  setDmConnection(state.dmStreamStatus === "connected" ? "reconnecting" : "connecting");
   try {
-    const { ticket } = await postJson("/api/dm/stream-ticket", {});
-    const es = new EventSource(
-      `/api/stream?role=dm&ticket=${encodeURIComponent(ticket)}`,
-    );
+    const es = await openTicketedEventSource({
+      issueTicket: () => postJson("/api/dm/stream-ticket", {}),
+      buildUrl: (ticket) =>
+        `/api/stream?role=dm&ticket=${encodeURIComponent(ticket)}`,
+    });
     state.dmStream = es;
+    es.addEventListener("open", () => setDmConnection("connected"));
     es.addEventListener("chat", (event) => appendDmMessage(JSON.parse(event.data)));
     es.addEventListener("whisper", (event) => appendDmMessage(JSON.parse(event.data)));
     es.addEventListener("presence", (event) => updatePlayers(JSON.parse(event.data).players));
@@ -782,6 +808,7 @@ async function connectDmStream() {
     };
   } catch (error) {
     if (error.status === 401) {
+      setDmConnection("disconnected");
       showDmLogin();
     } else {
       showToast(error.message);
@@ -1059,6 +1086,7 @@ elements.whisperSend?.addEventListener("click", async () => {
 let dmLoginResolve = null;
 
 function showDmLogin() {
+  setDmConnection("disconnected");
   elements.dmLogin?.classList.remove("hidden");
   elements.dmLoginPin?.focus();
 }
@@ -1091,6 +1119,7 @@ elements.dmLoginForm?.addEventListener("submit", async (event) => {
   try {
     const session = await postJson("/api/dm/login", { pin });
     state.dmCsrfToken = session.csrfToken;
+    setDmConnection("connecting");
     hideDmLogin();
     const resolveLogin = dmLoginResolve;
     dmLoginResolve = null;
@@ -1242,6 +1271,7 @@ function initResizers() {
 
 async function bootstrap() {
   initResizers();
+  setDmConnection("connecting");
   await ensureDmSession();
   await loadCampaigns();
   await syncDmChat();

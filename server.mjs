@@ -16,6 +16,10 @@ import {
   dmFileDisposition,
   verifyPlayerImage,
 } from "./lib/file-policy.mjs";
+import {
+  createLogger,
+  operationalError,
+} from "./lib/logger.mjs";
 import { TokenBucketRateLimiter } from "./lib/rate-limit.mjs";
 import { SessionRegistry } from "./lib/session-registry.mjs";
 import { Vault } from "./lib/vault.mjs";
@@ -25,6 +29,7 @@ const appRoot = path.dirname(fileURLToPath(import.meta.url));
 const vaultRoot = path.resolve(process.env.VAULT_ROOT || path.join(appRoot, ".."));
 const host = process.env.HOST || "127.0.0.1";
 const port = Number(process.env.PORT || 4173);
+const logger = createLogger();
 
 function positiveIntegerEnv(name, fallback) {
   const value = process.env[name];
@@ -54,8 +59,9 @@ const mimeTypes = {
   ".pdf": "application/pdf",
 };
 
+const CONFIGURED_TABLE_PIN = process.env.TABLE_PIN;
 const TABLE_PIN =
-  process.env.TABLE_PIN || String(randomInt(100_000, 1_000_000));
+  CONFIGURED_TABLE_PIN || String(randomInt(100_000, 1_000_000));
 const ALLOW_LOCAL_DM = process.env.ALLOW_LOCAL_DM !== "false";
 const ALLOW_REMOTE_DM = process.env.ALLOW_REMOTE_DM === "true";
 const REMOTE_BINDING = !["127.0.0.1", "::1", "localhost"].includes(host);
@@ -125,6 +131,11 @@ if (REMOTE_BINDING && !ALLOW_REMOTE_DM) {
     "Remote binding requires ALLOW_REMOTE_DM=true. Keep HOST=127.0.0.1 for local-only use.",
   );
 }
+if (REMOTE_BINDING && !CONFIGURED_TABLE_PIN) {
+  throw new Error(
+    "TABLE_PIN must be configured when remote DM access is enabled.",
+  );
+}
 if (REMOTE_BINDING && TABLE_PIN.length < 6) {
   throw new Error(
     "TABLE_PIN must be at least 6 characters when remote DM access is enabled.",
@@ -159,6 +170,10 @@ const status = {
 };
 let trackerSeq = 0;
 let shuttingDown = false;
+const readiness = {
+  persistence: false,
+  vault: false,
+};
 
 function isTracker(value) {
   if (
@@ -216,6 +231,12 @@ function isTrackerState(value) {
 const trackerStore = new AtomicJsonStore({
   file: TRACKERS_FILE,
   validate: isTrackerState,
+  onWarning: (_message, details = {}) => {
+    logger.warn("persistence_recovery", {
+      store: "trackers",
+      action: details.code || "RECOVERY_WARNING",
+    });
+  },
 });
 
 async function loadTrackers() {
@@ -234,7 +255,19 @@ function statusFor(role) {
 
 async function emitStatus() {
   status.updatedAt = Date.now();
-  await trackerStore.write({ trackers: status.trackers });
+  try {
+    await trackerStore.write({ trackers: status.trackers });
+  } catch (error) {
+    logger.error("persistence_failure", {
+      store: "trackers",
+      operation: "write",
+      error,
+    });
+    throw operationalError(
+      "Tracker changes could not be saved",
+      "TRACKER_WRITE_FAILED",
+    );
+  }
   for (const client of clients) {
     writeEvent(client, "status-set", statusFor(client.role));
   }
@@ -538,11 +571,15 @@ function isAllowedOrigin(request, origin) {
   );
 }
 
-function enforceWriteRequest(request) {
+function enforceWriteRequest(request, route) {
   if (!STATE_CHANGING_METHODS.has(request.method)) return;
 
   const fetchSite = String(request.headers["sec-fetch-site"] || "").toLowerCase();
   if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "none") {
+    logger.warn("authorization_denied", {
+      route,
+      reason: "cross_origin_fetch",
+    });
     reject(403, "Cross-origin requests are not allowed");
   }
 
@@ -552,12 +589,24 @@ function enforceWriteRequest(request) {
     try {
       normalized = new URL(origin).origin;
     } catch {
+      logger.warn("authorization_denied", {
+        route,
+        reason: "invalid_origin",
+      });
       reject(403, "Invalid request origin");
     }
     if (!isAllowedOrigin(request, normalized)) {
+      logger.warn("authorization_denied", {
+        route,
+        reason: "cross_origin_request",
+      });
       reject(403, "Cross-origin requests are not allowed");
     }
   } else if (!isLoopback(request)) {
+    logger.warn("authorization_denied", {
+      route,
+      reason: "missing_origin",
+    });
     reject(403, "An Origin header is required");
   }
 
@@ -570,30 +619,49 @@ function enforceWriteRequest(request) {
   }
 }
 
-function requireDmCsrf(request) {
+function requireDmCsrf(request, route) {
   if (
     !dmAuth.verifyCsrf(
       dmToken(request),
       request.headers["x-gm-cockpit-csrf"],
     )
   ) {
+    logger.warn("authorization_denied", {
+      route,
+      requiredRole: "dm",
+      reason: "invalid_csrf",
+    });
     reject(403, "Invalid CSRF token");
   }
 }
 
-function authorizeRequest(request, policy) {
+function authorizeRequest(request, policy, route) {
   if (policy.role === "dm") {
     const token = dmToken(request);
     const session = dmAuth.authenticate(token);
-    if (!session) reject(401, "DM login required");
-    if (policy.mutates) requireDmCsrf(request);
+    if (!session) {
+      logger.warn("authorization_denied", {
+        route,
+        requiredRole: "dm",
+        reason: "invalid_session",
+      });
+      reject(401, "DM login required");
+    }
+    if (policy.mutates) requireDmCsrf(request, route);
     return { role: "dm", token, session };
   }
 
   if (policy.role === "player") {
     const token = bearerToken(request);
     const player = playerSessions.authenticate(token);
-    if (!player) reject(401, "Player session required");
+    if (!player) {
+      logger.warn("authorization_denied", {
+        route,
+        requiredRole: "player",
+        reason: "invalid_session",
+      });
+      reject(401, "Player session required");
+    }
     return { role: "player", token, player };
   }
 
@@ -604,8 +672,15 @@ function authorizeRequest(request, policy) {
 
     const dmSessionToken = dmToken(request);
     const session = dmAuth.authenticate(dmSessionToken);
-    if (!session) reject(401, "Player or DM session required");
-    requireDmCsrf(request);
+    if (!session) {
+      logger.warn("authorization_denied", {
+        route,
+        requiredRole: "dm_or_player",
+        reason: "invalid_session",
+      });
+      reject(401, "Player or DM session required");
+    }
+    requireDmCsrf(request, route);
     return { role: "dm", token: dmSessionToken, session };
   }
 
@@ -622,7 +697,7 @@ function rateLimitIdentity(request, authorization) {
   return `ip:${clientIp(request)}`;
 }
 
-function enforceRateLimits(request, response, policy, authorization) {
+function enforceRateLimits(request, response, policy, authorization, route) {
   for (const rule of policy.rateLimits) {
     const key =
       rule.scope === "identity"
@@ -630,6 +705,11 @@ function enforceRateLimits(request, response, policy, authorization) {
         : `ip:${clientIp(request)}`;
     const result = rateLimiter.consume(rule.bucket, key, rule);
     if (!result.allowed) {
+      logger.warn("rate_limit_exceeded", {
+        route,
+        bucket: rule.bucket,
+        scope: rule.scope,
+      });
       sendRateLimited(response, result.retryAfterSeconds);
       return false;
     }
@@ -650,9 +730,9 @@ async function api(request, response, url) {
       { Allow: policy.method },
     );
   }
-  if (policy.mutates) enforceWriteRequest(request);
-  const authorization = authorizeRequest(request, policy);
-  if (!enforceRateLimits(request, response, policy, authorization)) return;
+  if (policy.mutates) enforceWriteRequest(request, url.pathname);
+  const authorization = authorizeRequest(request, policy, url.pathname);
+  if (!enforceRateLimits(request, response, policy, authorization, url.pathname)) return;
   const query = parseRouteQuery(policy, url.searchParams);
   const body = policy.parseBody
     ? parseRouteBody(
@@ -662,7 +742,18 @@ async function api(request, response, url) {
     : null;
 
   if (request.method === "GET" && url.pathname === "/api/health") {
-    return sendJson(response, 200, { ok: true, vaultRoot });
+    return sendJson(response, 200, { ok: true });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/readiness") {
+    const ready = readiness.persistence && readiness.vault;
+    return sendJson(response, ready ? 200 : 503, {
+      ready,
+      checks: {
+        persistence: readiness.persistence ? "ready" : "unavailable",
+        vault: readiness.vault ? "ready" : "unavailable",
+      },
+    });
   }
 
   if (request.method === "GET" && url.pathname === "/api/dm/session") {
@@ -677,6 +768,7 @@ async function api(request, response, url) {
       return sendJson(response, 401, { error: "DM login required" });
     }
     const created = dmAuth.createSession();
+    logger.info("dm_session_created", { source: "loopback" });
     return sendJson(
       response,
       200,
@@ -688,8 +780,10 @@ async function api(request, response, url) {
   if (request.method === "POST" && url.pathname === "/api/dm/login") {
     const authenticated = dmAuth.login(body.pin);
     if (!authenticated) {
+      logger.warn("dm_login", { outcome: "denied" });
       return sendJson(response, 401, { error: "Invalid table PIN" });
     }
+    logger.info("dm_login", { outcome: "accepted" });
     return sendJson(
       response,
       200,
@@ -720,10 +814,14 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/player/join") {
+    const joined = playerSessions.join(body.displayName);
+    logger.info("player_joined", {
+      registeredPlayers: playerSessions.players.size,
+    });
     return sendJson(
       response,
       200,
-      playerSessions.join(body.displayName),
+      joined,
     );
   }
 
@@ -745,6 +843,9 @@ async function api(request, response, url) {
       }
     }
     broadcast("presence", { players: connectedPlayers() });
+    logger.info("player_left", {
+      registeredPlayers: playerSessions.players.size,
+    });
     return sendJson(response, 200, { ok: true });
   }
 
@@ -814,11 +915,19 @@ async function api(request, response, url) {
         : { role: "dm" };
     response.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`);
     clients.add(client);
+    logger.info("stream_connected", {
+      role: client.role,
+      activeStreams: clients.size,
+    });
     writeEvent(client, "reveal-set", presentation);
     writeEvent(client, "status-set", statusFor(client.role));
     broadcast("presence", { players: connectedPlayers() });
     request.on("close", () => {
       clients.delete(client);
+      logger.info("stream_disconnected", {
+        role: client.role,
+        activeStreams: clients.size,
+      });
       broadcast("presence", { players: connectedPlayers() });
     });
     return;
@@ -987,6 +1096,9 @@ async function api(request, response, url) {
   }
 
   if (request.method === "POST" && url.pathname === "/api/status/upsert") {
+    const previousTrackers = structuredClone(status.trackers);
+    const previousTrackerSeq = trackerSeq;
+    const previousUpdatedAt = status.updatedAt;
     const id = body.id === undefined ? null : body.id;
     let tracker = id === null ? null : status.trackers.find((t) => t.id === id);
     if (id !== null && !tracker) {
@@ -1026,18 +1138,33 @@ async function api(request, response, url) {
       }
       tracker.value = Math.max(0, Math.min(tracker.max, tracker.value));
     }
-    await emitStatus();
+    try {
+      await emitStatus();
+    } catch (error) {
+      status.trackers = previousTrackers;
+      trackerSeq = previousTrackerSeq;
+      status.updatedAt = previousUpdatedAt;
+      throw error;
+    }
     return sendJson(response, 200, { ok: true, tracker });
   }
 
   if (request.method === "POST" && url.pathname === "/api/status/remove") {
+    const previousTrackers = structuredClone(status.trackers);
+    const previousUpdatedAt = status.updatedAt;
     const id = body.id;
     const before = status.trackers.length;
     status.trackers = status.trackers.filter((t) => t.id !== id);
     if (status.trackers.length === before) {
       return sendJson(response, 404, { error: "Tracker not found" });
     }
-    await emitStatus();
+    try {
+      await emitStatus();
+    } catch (error) {
+      status.trackers = previousTrackers;
+      status.updatedAt = previousUpdatedAt;
+      throw error;
+    }
     return sendJson(response, 200, { ok: true });
   }
 
@@ -1104,11 +1231,21 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && url.pathname === "/api/notes") {
     const operation = body;
-    const result = await vault.saveNotes(
-      operation.campaign,
-      operation.session,
-      operation.notes,
-    );
+    let result;
+    try {
+      result = await vault.saveNotes(
+        operation.campaign,
+        operation.session,
+        operation.notes,
+      );
+    } catch (error) {
+      logger.error("persistence_failure", {
+        store: "session_notes",
+        operation: "write",
+        error,
+      });
+      throw error;
+    }
     return sendJson(
       response,
       200,
@@ -1140,6 +1277,7 @@ async function staticFile(request, response, url) {
 }
 
 const server = createServer(async (request, response) => {
+  let url = null;
   try {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
       response.setHeader(name, value);
@@ -1147,7 +1285,7 @@ const server = createServer(async (request, response) => {
     if (shuttingDown) {
       return sendJson(response, 503, { error: "Server is shutting down" });
     }
-    const url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
+    url = new URL(request.url, `http://${request.headers.host || `${host}:${port}`}`);
     if (url.pathname.startsWith("/api/")) {
       await api(request, response, url);
     } else {
@@ -1155,9 +1293,20 @@ const server = createServer(async (request, response) => {
     }
   } catch (error) {
     const status = error.status || 500;
-    if (status >= 500) console.error(error);
+    if (status >= 500) {
+      logger.error("request_failed", {
+        method: request.method,
+        route: url?.pathname || "unparsed",
+        status,
+        error,
+      });
+    }
     if (!response.headersSent) {
-      sendJson(response, status, { error: error.message || "Unexpected server error" });
+      const message =
+        status >= 500 && error.expose !== true
+          ? "Internal server error"
+          : error.message || "Unexpected server error";
+      sendJson(response, status, { error: message });
     }
   }
 });
@@ -1186,9 +1335,9 @@ function closeHttpServer() {
 async function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`Received ${signal}; finishing pending writes...`);
+  logger.info("shutdown_started", { signal });
   const timeout = setTimeout(() => {
-    console.error("Shutdown timed out before persistence completed.");
+    logger.error("shutdown_timeout", {});
     server.closeAllConnections?.();
     process.exit(1);
   }, 5_000);
@@ -1198,11 +1347,11 @@ async function shutdown(signal) {
     await closeHttpServer();
     await Promise.all([trackerStore.close(), vault.flushWrites()]);
     clearTimeout(timeout);
-    console.log("Shutdown complete.");
+    logger.info("shutdown_complete", {});
     if (process.connected) process.disconnect();
   } catch (error) {
     clearTimeout(timeout);
-    console.error(`Shutdown failed: ${error.message}`);
+    logger.error("shutdown_failed", { error });
     process.exitCode = 1;
     if (process.connected) process.disconnect();
   }
@@ -1227,17 +1376,38 @@ function lanAddress() {
   return host;
 }
 
-await loadTrackers();
+try {
+  await loadTrackers();
+  readiness.persistence = true;
+} catch (error) {
+  logger.error("startup_dependency_failed", {
+    dependency: "persistence",
+    error,
+  });
+}
+try {
+  await vault.campaigns();
+  readiness.vault = true;
+} catch (error) {
+  logger.error("startup_dependency_failed", {
+    dependency: "vault",
+    error,
+  });
+}
 
 server.listen(port, host, () => {
   const lan = lanAddress();
   if (REMOTE_BINDING) {
-    console.warn(
-      "WARNING: Remote DM access is enabled. Keep this server on a trusted LAN until cloud relay hardening is complete.",
-    );
+    logger.warn("remote_dm_enabled", { network: "trusted_lan_only" });
   }
-  console.log(`GM Campaign Cockpit (DM): http://${host}:${port}`);
-  console.log(`Player screen (LAN):      http://${lan}:${port}/player.html`);
-  console.log(`Vault: ${vaultRoot}`);
-  console.log(`Table PIN (remote DM login): ${TABLE_PIN}`);
+  logger.info("startup", {
+    host,
+    port,
+    mode: REMOTE_BINDING ? "lan" : "local",
+    localDmAccess: ALLOW_LOCAL_DM,
+    remoteDmAccess: ALLOW_REMOTE_DM,
+    ready: readiness.persistence && readiness.vault,
+    dmUrl: `http://${host}:${port}`,
+    playerUrl: `http://${lan}:${port}/player.html`,
+  });
 });

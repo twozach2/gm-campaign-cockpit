@@ -136,6 +136,32 @@ select {
   font-size: 11px;
 }
 
+.connection-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.connection-state::before {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+  content: "";
+}
+
+.connection-state[data-state="connected"]::before {
+  background: #4fd69c;
+}
+
+.connection-state[data-state="reconnecting"]::before,
+.connection-state[data-state="disconnected"]::before {
+  background: #ff5680;
+}
+
 .auth-overlay {
   position: fixed;
   inset: 0;

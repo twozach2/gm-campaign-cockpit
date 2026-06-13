@@ -28,6 +28,7 @@ const EXPECTED_ROUTES = [
   "/api/player/rename",
   "/api/player/state",
   "/api/player/stream-ticket",
+  "/api/readiness",
   "/api/reveal/card",
   "/api/reveal/clear",
   "/api/reveal/image",

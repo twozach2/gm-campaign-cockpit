@@ -1,4 +1,5 @@
 import { escapeHtml, feedEntryHtml, trackerHtml, rollHtml } from "/render.mjs";
+import { openTicketedEventSource } from "/stream-connection.mjs";
 
 const NAME_KEY = "gm-cockpit:player-name";
 const SESSION_KEY = "gm-cockpit:player-session";
@@ -25,6 +26,7 @@ const elements = {
   toast: document.querySelector("#player-toast"),
   lightbox: document.querySelector("#lightbox"),
   lightboxImg: document.querySelector("#lightbox-img"),
+  connection: document.querySelector("#player-connection"),
 };
 
 let name = "";
@@ -35,6 +37,7 @@ let player = null;
 let eventSource = null;
 let reconnectTimer = null;
 let connecting = false;
+let connectionStatus = "connecting";
 const renderedIds = new Set();
 const feedNodes = new Map();
 let activeTab = "shared";
@@ -193,6 +196,7 @@ function clearSession() {
   if (eventSource) eventSource.close();
   eventSource = null;
   clearTimeout(reconnectTimer);
+  setConnectionStatus("disconnected");
 }
 
 async function sync() {
@@ -210,25 +214,49 @@ async function sync() {
 
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
+  setConnectionStatus("reconnecting");
   reconnectTimer = setTimeout(() => {
     connect();
   }, 1000);
+}
+
+function setConnectionStatus(nextState) {
+  const previous = connectionStatus;
+  connectionStatus = nextState;
+  if (elements.connection) {
+    elements.connection.dataset.state = nextState;
+    elements.connection.textContent =
+      nextState === "connected"
+        ? "Live"
+        : nextState === "reconnecting"
+          ? "Reconnecting"
+          : nextState === "disconnected"
+            ? "Offline"
+            : "Connecting";
+  }
+  if (nextState === "reconnecting" && previous === "connected") {
+    showToast("Connection lost - reconnecting");
+  }
 }
 
 async function connect() {
   if (!token || connecting) return;
   connecting = true;
   if (eventSource) eventSource.close();
+  setConnectionStatus(connectionStatus === "connected" ? "reconnecting" : "connecting");
   try {
-    const { ticket } = await playerRequest("/api/player/stream-ticket", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
+    const es = await openTicketedEventSource({
+      issueTicket: () =>
+        playerRequest("/api/player/stream-ticket", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        }),
+      buildUrl: (ticket) =>
+        `/api/stream?ticket=${encodeURIComponent(ticket)}`,
     });
-    const es = new EventSource(
-      `/api/stream?ticket=${encodeURIComponent(ticket)}`,
-    );
     eventSource = es;
+    es.addEventListener("open", () => setConnectionStatus("connected"));
     es.addEventListener("hello", (event) => {
       const data = JSON.parse(event.data);
       if (data.player) applyPlayer(data.player);
@@ -317,6 +345,7 @@ async function setName(value) {
 }
 
 function promptForName() {
+  setConnectionStatus("disconnected");
   elements.overlay.classList.remove("hidden");
   elements.nameInput.value = name;
   elements.nameInput.focus();

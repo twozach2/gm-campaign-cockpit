@@ -92,6 +92,14 @@ test("remote binding requires explicit opt-in and a strong PIN", async () => {
   assert.notEqual(noOptIn.code, 0);
   assert.match(noOptIn.output, /ALLOW_REMOTE_DM=true/);
 
+  const missingPin = await rejectedStartup({
+    HOST: "0.0.0.0",
+    ALLOW_REMOTE_DM: "true",
+    TABLE_PIN: "",
+  });
+  assert.notEqual(missingPin.code, 0);
+  assert.match(missingPin.output, /TABLE_PIN must be configured/);
+
   const weakPin = await rejectedStartup({
     HOST: "0.0.0.0",
     ALLOW_REMOTE_DM: "true",
