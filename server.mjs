@@ -686,6 +686,76 @@ async function relayControlRequest(pathname, { method = "GET", body } = {}) {
   return data;
 }
 
+function relayAssetConfigured() {
+  return Boolean(
+    relayConfig.controlUrl &&
+      relayConfig.deviceId &&
+      relayConfig.deviceToken &&
+      relayConfig.roomId,
+  );
+}
+
+async function uploadRelayImage(contentType, content) {
+  if (!relayAssetConfigured()) return null;
+  try {
+    const grant = await relayControlRequest("/v1/device/assets/grants", {
+      method: "POST",
+      body: {
+        roomId: relayConfig.roomId,
+        contentType,
+        byteLength: content.length,
+        sha256: createHash("sha256").update(content).digest("base64url"),
+      },
+    });
+    if (
+      typeof grant.assetId !== "string" ||
+      typeof grant.uploadToken !== "string"
+    ) {
+      throw new Error("Relay returned an invalid asset upload grant");
+    }
+    const response = await fetch(
+      `${relayConfig.controlUrl}/v1/assets/upload/${encodeURIComponent(grant.assetId)}`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${grant.uploadToken}`,
+          "Content-Type": contentType,
+          "Content-Length": String(content.length),
+        },
+        body: content,
+        signal: AbortSignal.timeout(30_000),
+      },
+    );
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.asset?.id !== grant.assetId) {
+      throw new Error(result.error || "Relay rejected the asset upload");
+    }
+    return grant.assetId;
+  } catch (error) {
+    logger.warn("relay_asset_upload_failed", {
+      reason: error.code || "ASSET_UPLOAD_FAILED",
+    });
+    throw Object.assign(new Error("Hosted image upload failed"), {
+      status: 503,
+      code: "RELAY_ASSET_UPLOAD_FAILED",
+    });
+  }
+}
+
+async function deleteRelayAsset(assetId) {
+  if (!relayAssetConfigured() || !assetId) return;
+  try {
+    await relayControlRequest(
+      `/v1/device/assets/${encodeURIComponent(assetId)}`,
+      { method: "DELETE" },
+    );
+  } catch (error) {
+    logger.warn("relay_asset_delete_failed", {
+      reason: error.code || "ASSET_DELETE_FAILED",
+    });
+  }
+}
+
 async function refreshRelayRooms() {
   if (!relayConfig.deviceToken) {
     relayRooms = [];
@@ -1375,7 +1445,9 @@ async function api(request, response, url) {
   if (request.method === "POST" && url.pathname === "/api/reveal/image") {
     const filePath = await vault.resolveFilePath(body.campaign, body.file);
     await assertBoundedFile(filePath);
-    await verifyPlayerImage(filePath);
+    const contentType = await verifyPlayerImage(filePath);
+    const content = await readBoundedFile(filePath);
+    const assetId = await uploadRelayImage(contentType, content);
     const { folder } = await vault.campaignFolder(body.campaign);
     const relativeFile = path.relative(folder, filePath).replaceAll(path.sep, "/");
     const basename = String(body.file).split("/").pop();
@@ -1383,8 +1455,14 @@ async function api(request, response, url) {
       campaign: body.campaign,
       file: relativeFile,
       title: String(body.title || basename || "Image").slice(0, 120),
+      ...(assetId ? { assetId } : {}),
     });
-    addPresentationItem(item);
+    try {
+      addPresentationItem(item);
+    } catch (error) {
+      await deleteRelayAsset(assetId);
+      throw error;
+    }
     emitPresentation();
     return sendJson(response, 200, { ok: true, item });
   }
@@ -1401,18 +1479,23 @@ async function api(request, response, url) {
 
   if (request.method === "POST" && url.pathname === "/api/reveal/remove") {
     const id = body.id;
-    const before = presentation.items.length;
+    const removed = presentation.items.find((item) => item.id === id);
     presentation.items = presentation.items.filter((i) => i.id !== id);
-    if (presentation.items.length === before) {
+    if (!removed) {
       return sendJson(response, 404, { error: "Item not found" });
     }
     emitPresentation();
+    await deleteRelayAsset(removed.assetId);
     return sendJson(response, 200, { ok: true });
   }
 
   if (request.method === "POST" && url.pathname === "/api/reveal/clear") {
+    const assetIds = presentation.items
+      .map((item) => item.assetId)
+      .filter(Boolean);
     presentation.items = [];
     emitPresentation();
+    await Promise.all(assetIds.map(deleteRelayAsset));
     return sendJson(response, 200, { ok: true });
   }
 

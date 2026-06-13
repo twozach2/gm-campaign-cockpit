@@ -9,10 +9,11 @@ tags:
   - player-facing
 ---
 
-# __CAMPAIGN_NAME__ — Player's Guide
+# __CAMPAIGN_NAME__: Player's Guide
 
-<!-- Everything here is player-safe. Each "## Heading" is ONE pushable card (Model A). -->
-<!-- Avoid image embeds in cards — image reveals use the DM's "push image" control. -->
+<!-- Everything in this file must be safe for players to see. -->
+<!-- Each "## Heading" and its content becomes one pushable player card. -->
+<!-- Reveal images separately with the cockpit's image reveal control. -->
 
 Intro paragraph the whole table can read. Replace this.
 

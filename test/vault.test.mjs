@@ -306,8 +306,10 @@ test("scaffoldCampaign creates a campaign that validates cleanly", async () => {
   const vaultRoot = await mkdtemp(path.join(os.tmpdir(), "scaffold-"));
   const result = await scaffoldCampaign("Test Campaign", { vaultRoot, templatesDir: TEMPLATES_DIR });
   assert.ok(result.files.includes("Director's Guide.md"));
+  assert.ok(result.files.includes("Handout - Example.md"));
   assert.ok(result.files.includes("Player's Guide.md"));
   assert.ok(result.files.includes("Session Notes Workbook.md"));
+  assert.ok(result.files.every((file) => /^[\x00-\x7F]+$/.test(file)));
 
   const vault = new Vault({ root: vaultRoot, appRoot: vaultRoot });
   const report = await vault.validateCampaign("Test Campaign");

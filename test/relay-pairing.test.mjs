@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,6 +23,10 @@ const silentLogger = {
   warn() {},
   error() {},
 };
+const PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9WlXgAAAAASUVORK5CYII=",
+  "base64",
+);
 
 async function waitFor(check, timeoutMs = 3_000) {
   const startedAt = Date.now();
@@ -55,6 +65,14 @@ test("local cockpit pairs, discovers a room, and opens its outbound relay connec
   const pairing = await relayStore.createPairing({ accountId: account.id });
 
   const localRoot = await mkdtemp(path.join(os.tmpdir(), "gm-local-pairing-"));
+  const campaignFolder = path.join(localRoot, "Worldwide Campaign");
+  await mkdir(campaignFolder, { recursive: true });
+  await writeFile(
+    path.join(campaignFolder, "Director's Guide.md"),
+    "# Session 1: Opening\n## Scene 1.1: Arrival\n",
+    "utf8",
+  );
+  await writeFile(path.join(campaignFolder, "portrait.png"), PNG);
   const local = await startTestServer(t, {
     root: localRoot,
     env: {
@@ -133,6 +151,62 @@ test("local cockpit pairs, discovers a room, and opens its outbound relay connec
   });
   assert.equal(live.connection.state, "connected");
   assert.equal(relayService.agents.get(room.id)?.hello, true);
+
+  const invite = await relayStore.createInvite({ roomId: room.id });
+  const joinedResponse = await fetch(`${relayBase}/v1/invites/redeem`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      inviteToken: invite.token,
+      displayName: "Remote player",
+    }),
+  });
+  assert.equal(joinedResponse.status, 200);
+  const joined = await joinedResponse.json();
+
+  const revealed = await api(
+    local.base,
+    "POST",
+    "/api/reveal/image",
+    { campaign: "Worldwide Campaign", file: "portrait.png" },
+    { headers: dmHeaders },
+  );
+  assert.equal(revealed.status, 200);
+  assert.match(revealed.data.item.assetId, /^asset_/);
+
+  await waitFor(() => {
+    const item = relayStore
+      .roomState(room.id)
+      ?.state.presentation.items.find(
+        (entry) => entry.id === revealed.data.item.id,
+      );
+    return item?.assetId === revealed.data.item.assetId;
+  });
+
+  const hostedImage = await fetch(
+    `${relayBase}/v1/assets/${encodeURIComponent(revealed.data.item.assetId)}`,
+    {
+      headers: { Authorization: `Bearer ${joined.token}` },
+    },
+  );
+  assert.equal(hostedImage.status, 200);
+  assert.deepEqual(Buffer.from(await hostedImage.arrayBuffer()), PNG);
+
+  const retracted = await api(
+    local.base,
+    "POST",
+    "/api/reveal/remove",
+    { id: revealed.data.item.id },
+    { headers: dmHeaders },
+  );
+  assert.equal(retracted.status, 200);
+  const removedImage = await fetch(
+    `${relayBase}/v1/assets/${encodeURIComponent(revealed.data.item.assetId)}`,
+    {
+      headers: { Authorization: `Bearer ${joined.token}` },
+    },
+  );
+  assert.equal(removedImage.status, 404);
 
   const persisted = JSON.parse(
     await readFile(path.join(localRoot, "relay-device.json"), "utf8"),

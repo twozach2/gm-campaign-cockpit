@@ -160,6 +160,8 @@ test("hosted relay exposes bounded health, readiness, and player session routes"
   assert.equal(playerScript.status, 200);
   const playerScriptSource = await playerScript.text();
   assert.match(playerScriptSource, /gm-campaign-cockpit-player-v1/);
+  assert.match(playerScriptSource, /\/v1\/assets\//);
+  assert.match(playerScriptSource, /Authorization.*Bearer/);
   assert.doesNotMatch(playerScriptSource, /\?token=|searchParams.*token/i);
   const renderer = await fetch(`${relay.baseUrl}/player/render.mjs`);
   assert.equal(renderer.status, 200);

@@ -1,6 +1,6 @@
 ---
 aliases:
-  - Handout — Example
+  - Handout - Example
 campaign: __CAMPAIGN_NAME__
 document_type: handout
 format: Obsidian Markdown
@@ -9,7 +9,7 @@ tags:
   - player-facing
 ---
 
-# Handout — Example
+# Handout - Example
 
 <!-- Optional supporting doc. Reference it from the Director's Guide via a wiki link. -->
 <!-- Delete this file if you don't need it. -->

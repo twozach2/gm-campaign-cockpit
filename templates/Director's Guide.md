@@ -9,22 +9,24 @@ tags:
   - director-guide
 ---
 
-<!-- DIRECTOR'S GUIDE — required. The app discovers a campaign by THIS file's presence. -->
+<!-- DIRECTOR'S GUIDE - required. The app discovers a campaign by this exact filename. -->
 <!-- File Contract:
-       Sessions:  "# Session N — Title"   (1 to 3 #, a separator like em-dash/en-dash/colon/hyphen, title optional)
-       Scenes:    "## Scene N.M: Title"    (2 to 4 #, optional "(qualifier)" before the separator)
-     Every Session number must be UNIQUE. Replace the placeholders below, then add more. -->
+       Sessions: "# Session N: Title" (1 to 3 #; title optional)
+       Scenes:   "## Scene N.M: Title" (2 to 4 #; optional qualifier before the colon)
+     Every session number must be unique. Replace the examples below, then add more. -->
 
-# Session 1 — Replace With A Session Title
+# Session 1: Replace With A Session Title
 
-Session-level brief / overview goes here, before the first scene.
+This text is the session brief. Put the opening situation, likely routes,
+important NPCs, and session-level reminders here before the first scene.
 
 ## Scene 1.1: Replace With A Scene Title
 
-Scene content. Link other campaign docs with [[Player's Guide]].
+Put the scene goal, location, cast, clues, complications, and likely outcomes
+here. Link supporting campaign documents with [[Player's Guide]].
 
 ## Scene 1.2: Replace With A Scene Title
 
-# Session 2 — Replace With A Session Title
+# Session 2: Replace With A Session Title
 
 ## Scene 2.1: Replace With A Scene Title

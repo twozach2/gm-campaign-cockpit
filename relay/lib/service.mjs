@@ -22,6 +22,7 @@ import {
   rejectUpgrade,
 } from "./websocket.mjs";
 import { RelayAccountAuth } from "./account-auth.mjs";
+import { RelayAssetStore } from "./assets.mjs";
 
 const AGENT_PROTOCOL = "gm-campaign-cockpit-v1";
 const PLAYER_PROTOCOL = "gm-campaign-cockpit-player-v1";
@@ -30,6 +31,8 @@ const MAX_HTTP_BODY = 8_192;
 const MAX_CONNECTIONS = 1_000;
 const MAX_PENDING_COMMANDS = 2_000;
 const COMMAND_TIMEOUT_MS = 15_000;
+const DEFAULT_MAX_ASSET_BYTES = 25 * 1024 * 1024;
+const ASSET_PRUNE_INTERVAL_MS = 60_000;
 const defaultPublicRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -82,6 +85,26 @@ async function readJson(request) {
   } catch {
     throw requestError("Request body is not valid JSON");
   }
+}
+
+async function readBinary(request, maxBytes) {
+  const declared = Number(request.headers["content-length"]);
+  if (
+    request.headers["content-length"] !== undefined &&
+    (!Number.isSafeInteger(declared) || declared < 0 || declared > maxBytes)
+  ) {
+    throw requestError("Request body is too large", 413, "BODY_TOO_LARGE");
+  }
+  let size = 0;
+  const chunks = [];
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) {
+      throw requestError("Request body is too large", 413, "BODY_TOO_LARGE");
+    }
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 function exactObject(value, keys, label) {
@@ -229,6 +252,8 @@ export class HostedRelayService {
     maxMessageBytes = RELAY_MAX_MESSAGE_BYTES,
     publicOrigin,
     accountAuth,
+    assetStore,
+    maxAssetBytes = DEFAULT_MAX_ASSET_BYTES,
     publicRoot = defaultPublicRoot,
     appPublicRoot = defaultAppPublicRoot,
     now = () => Date.now(),
@@ -251,6 +276,15 @@ export class HostedRelayService {
         store,
         now,
       });
+    this.assetStore =
+      assetStore ||
+      new RelayAssetStore({
+        root: path.join(path.dirname(store.store.file), "assets"),
+        maxBytes: maxAssetBytes,
+        logger,
+        now,
+      });
+    this.maxAssetBytes = maxAssetBytes;
     this.publicRoot = path.resolve(publicRoot);
     this.appPublicRoot = path.resolve(appPublicRoot);
     this.ready = false;
@@ -260,10 +294,12 @@ export class HostedRelayService {
     this.pendingCommands = new Map();
     this.commandReceipts = new Map();
     this.heartbeatTimer = null;
+    this.assetPruneTimer = null;
   }
 
   async start() {
     await this.store.init();
+    await this.assetStore.init();
     this.server = this.tls
       ? createHttpsServer(this.tls, (request, response) =>
           this.handleHttp(request, response),
@@ -284,6 +320,14 @@ export class HostedRelayService {
       this.heartbeatMs,
     );
     this.heartbeatTimer.unref();
+    this.assetPruneTimer = setInterval(() => {
+      void this.assetStore.prune().catch((error) => {
+        this.logger.warn("hosted_relay_asset_prune_failed", {
+          reason: error.code || "ASSET_PRUNE_FAILED",
+        });
+      });
+    }, ASSET_PRUNE_INTERVAL_MS);
+    this.assetPruneTimer.unref();
     const address = this.address();
     this.logger.info("hosted_relay_started", {
       host: address.host,
@@ -307,6 +351,7 @@ export class HostedRelayService {
   async stop() {
     this.ready = false;
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.assetPruneTimer) clearInterval(this.assetPruneTimer);
     for (const agent of this.agents.values()) {
       agent.connection.close(1001, "Relay shutting down");
     }
@@ -324,6 +369,7 @@ export class HostedRelayService {
         this.server.close((error) => (error ? reject(error) : resolve()));
       });
     }
+    await this.assetStore.close();
     await this.store.close();
     this.logger.info("hosted_relay_stopped", {});
   }
@@ -442,6 +488,98 @@ export class HostedRelayService {
       }
       if (
         request.method === "POST" &&
+        url.pathname === "/v1/device/assets/grants"
+      ) {
+        this.rejectCrossOrigin(request);
+        const device = this.store.authenticateDevice(bearer(request));
+        if (!device) {
+          return json(response, 401, { error: "Device session required" });
+        }
+        const body = exactObject(
+          await readJson(request),
+          ["roomId", "contentType", "byteLength", "sha256"],
+          "Asset upload grant",
+        );
+        const roomId = requiredString(body.roomId, "Room ID", 128);
+        if (!this.store.authorizeDeviceRoom(device.id, roomId)) {
+          return json(response, 403, { error: "Device cannot upload to this room" });
+        }
+        const grant = await this.assetStore.createGrant({
+          roomId,
+          deviceId: device.id,
+          contentType: requiredString(body.contentType, "Content type", 80),
+          byteLength: body.byteLength,
+          sha256: requiredString(body.sha256, "Asset digest", 80),
+        });
+        return json(response, 201, grant);
+      }
+      const uploadAssetId = routeId(url.pathname, "/v1/assets/upload/");
+      if (request.method === "PUT" && uploadAssetId) {
+        this.rejectCrossOrigin(request);
+        const uploadToken = bearer(request);
+        const grant = this.assetStore.uploadGrant(uploadAssetId, uploadToken);
+        if (!grant) {
+          return json(response, 401, {
+            error: "Asset upload grant is invalid or expired",
+          });
+        }
+        const contentType = String(request.headers["content-type"] || "")
+          .split(";")[0]
+          .trim()
+          .toLowerCase();
+        const content = await readBinary(request, grant.byteLength);
+        const asset = await this.assetStore.completeUpload({
+          assetId: uploadAssetId,
+          uploadToken,
+          contentType,
+          content,
+        });
+        return json(response, 201, { asset });
+      }
+      const deviceAssetId = routeId(url.pathname, "/v1/device/assets/");
+      if (request.method === "DELETE" && deviceAssetId) {
+        this.rejectCrossOrigin(request);
+        const device = this.store.authenticateDevice(bearer(request));
+        if (!device) {
+          return json(response, 401, { error: "Device session required" });
+        }
+        const existing = this.assetStore.asset(deviceAssetId);
+        if (
+          !existing ||
+          !this.store.authorizeDeviceRoom(device.id, existing.roomId)
+        ) {
+          return json(response, 404, { error: "Asset not found" });
+        }
+        const asset = await this.assetStore.deleteAsset({
+          assetId: deviceAssetId,
+          deviceId: device.id,
+        });
+        return json(response, 200, { asset });
+      }
+      const playerAssetId = routeId(url.pathname, "/v1/assets/");
+      if (request.method === "GET" && playerAssetId) {
+        const membership = this.store.authenticateMembership(bearer(request));
+        if (!membership) {
+          return json(response, 401, { error: "Player session required" });
+        }
+        const result = await this.assetStore.readAsset(
+          playerAssetId,
+          membership.roomId,
+        );
+        if (!result) {
+          return json(response, 404, { error: "Asset not found" });
+        }
+        response.writeHead(200, {
+          "Content-Type": result.asset.contentType,
+          "Content-Length": result.content.length,
+          "Cache-Control": "private, no-store",
+          "Content-Security-Policy": "sandbox; default-src 'none'",
+          "X-Content-Type-Options": "nosniff",
+        });
+        return response.end(result.content);
+      }
+      if (
+        request.method === "POST" &&
         url.pathname === "/v1/admin/devices/revoke"
       ) {
         const session = this.requireAdminMutation(request);
@@ -450,9 +588,16 @@ export class HostedRelayService {
           ["deviceId"],
           "Device revocation",
         );
+        const deviceId = requiredString(body.deviceId, "Device ID", 128);
+        const rooms = this.store
+          .rooms(session.account.id)
+          .filter((room) => room.agentDeviceId === deviceId);
         const device = await this.store.revokeDevice(
           session.account.id,
-          requiredString(body.deviceId, "Device ID", 128),
+          deviceId,
+        );
+        await Promise.all(
+          rooms.map((room) => this.cleanupRoomAssets(room.id)),
         );
         this.disconnectDevice(device.id);
         return json(response, 200, { device });
@@ -504,6 +649,7 @@ export class HostedRelayService {
           session.account.id,
           requiredString(body.roomId, "Room ID", 128),
         );
+        await this.cleanupRoomAssets(room.id);
         this.disconnectRoom(room.id, "Room ended");
         return json(response, 200, { room });
       }
@@ -609,7 +755,7 @@ export class HostedRelayService {
     const content = await readFile(path.join(root, filename));
     response.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
     );
     response.writeHead(200, {
       "Content-Type": contentType,
@@ -692,6 +838,18 @@ export class HostedRelayService {
         playerConnections: this.players.get(room.id)?.size || 0,
       })),
     };
+  }
+
+  async cleanupRoomAssets(roomId) {
+    try {
+      return await this.assetStore.deleteRoomAssets(roomId);
+    } catch (error) {
+      this.logger.warn("hosted_relay_asset_cleanup_failed", {
+        roomId,
+        reason: error.code || "ASSET_CLEANUP_FAILED",
+      });
+      return [];
+    }
   }
 
   disconnectDevice(deviceId) {

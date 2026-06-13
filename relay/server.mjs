@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadLocalEnvironment } from "../lib/config.mjs";
 import { createLogger } from "../lib/logger.mjs";
+import { RelayAssetStore } from "./lib/assets.mjs";
 import { HostedRelayService } from "./lib/service.mjs";
 import { RelayStore } from "./lib/store.mjs";
 
@@ -17,6 +18,31 @@ if (!Number.isSafeInteger(port) || port < 0 || port > 65_535) {
 }
 const stateFile = path.resolve(
   process.env.RELAY_STATE_FILE || path.join(relayRoot, "data", "relay.json"),
+);
+function positiveInteger(name, fallback) {
+  const value = process.env[name];
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
+}
+const assetRoot = path.resolve(
+  process.env.RELAY_ASSET_DIR ||
+    path.join(path.dirname(stateFile), "assets"),
+);
+const maxAssetBytes = positiveInteger(
+  "RELAY_MAX_ASSET_BYTES",
+  25 * 1024 * 1024,
+);
+const assetRetentionMs = positiveInteger(
+  "RELAY_ASSET_RETENTION_MS",
+  7 * 24 * 60 * 60 * 1_000,
+);
+const assetGrantTtlMs = positiveInteger(
+  "RELAY_ASSET_GRANT_TTL_MS",
+  5 * 60 * 1_000,
 );
 const certFile = process.env.RELAY_TLS_CERT_FILE;
 const keyFile = process.env.RELAY_TLS_KEY_FILE;
@@ -34,6 +60,13 @@ const tls =
     : null;
 const logger = createLogger();
 const store = new RelayStore({ file: stateFile, logger });
+const assetStore = new RelayAssetStore({
+  root: assetRoot,
+  maxBytes: maxAssetBytes,
+  retentionMs: assetRetentionMs,
+  grantTtlMs: assetGrantTtlMs,
+  logger,
+});
 const publicOrigin = process.env.RELAY_PUBLIC_ORIGIN || undefined;
 if (publicOrigin) {
   const parsed = new URL(publicOrigin);
@@ -52,6 +85,8 @@ if (publicOrigin) {
 }
 const service = new HostedRelayService({
   store,
+  assetStore,
+  maxAssetBytes,
   host,
   port,
   tls,

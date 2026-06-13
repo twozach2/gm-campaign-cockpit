@@ -27,6 +27,7 @@ const state = {
   pending: new Map(),
   renderedMessages: new Set(),
   feedNodes: new Map(),
+  assetUrls: new Map(),
   statusSignature: null,
   activeTab: "shared",
   whisper: false,
@@ -101,7 +102,9 @@ function clearStoredSession() {
     players: [],
   };
   for (const node of state.feedNodes.values()) node.remove();
+  for (const url of state.assetUrls.values()) URL.revokeObjectURL(url);
   state.feedNodes.clear();
+  state.assetUrls.clear();
   state.renderedMessages.clear();
   state.statusSignature = null;
   elements.holding.classList.remove("hidden");
@@ -195,10 +198,38 @@ function applyMembership(membership) {
 function buildFeedEntry(item) {
   const template = document.createElement("template");
   template.innerHTML = feedEntryHtml(item, {
-    imageUrl: () => "",
+    imageUrl: () => "data:,",
     fileUrl: () => "",
   });
   return template.content.firstElementChild;
+}
+
+async function loadImage(item, node) {
+  try {
+    const response = await fetch(
+      `/v1/assets/${encodeURIComponent(item.assetId)}`,
+      {
+        headers: { Authorization: `Bearer ${state.token}` },
+      },
+    );
+    if (!response.ok) throw new Error(`Image request failed (${response.status})`);
+    const blob = await response.blob();
+    if (state.feedNodes.get(item.id) !== node) return;
+    const previous = state.assetUrls.get(item.id);
+    if (previous) URL.revokeObjectURL(previous);
+    const objectUrl = URL.createObjectURL(blob);
+    state.assetUrls.set(item.id, objectUrl);
+    const image = node.querySelector(".feed-image");
+    if (image) image.src = objectUrl;
+  } catch {
+    if (state.feedNodes.get(item.id) === node) {
+      node.querySelector(".feed-image")?.remove();
+      node.querySelector(".feed-body")?.insertAdjacentHTML(
+        "beforeend",
+        '<p class="muted">This image is unavailable.</p>',
+      );
+    }
+  }
 }
 
 function applyPresentation(presentation) {
@@ -208,12 +239,17 @@ function applyPresentation(presentation) {
     if (!ids.has(id)) {
       node.remove();
       state.feedNodes.delete(id);
+      const objectUrl = state.assetUrls.get(id);
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+      state.assetUrls.delete(id);
     }
   }
   let added = false;
   for (const item of items) {
-    if (item.type === "image" || state.feedNodes.has(item.id)) continue;
-    state.feedNodes.set(item.id, elements.feed.appendChild(buildFeedEntry(item)));
+    if (state.feedNodes.has(item.id)) continue;
+    const node = elements.feed.appendChild(buildFeedEntry(item));
+    state.feedNodes.set(item.id, node);
+    if (item.type === "image") void loadImage(item, node);
     added = true;
   }
   elements.holding.classList.toggle("hidden", state.feedNodes.size > 0);

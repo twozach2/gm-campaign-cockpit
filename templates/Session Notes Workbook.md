@@ -10,8 +10,9 @@ tags:
 
 # Session Notes Workbook
 
-<!-- The app writes live notes ONLY between the markers below — never edit inside them by hand. -->
-<!-- New "## Session N Notes" blocks are auto-created on first save; this is a starting example. -->
+<!-- The app writes live notes only between each session's protected markers. -->
+<!-- Do not rename, duplicate, or manually remove the marker comments. -->
+<!-- A missing "## Session N Notes" block is created automatically on first save. -->
 
 ## Session 1 Notes
 

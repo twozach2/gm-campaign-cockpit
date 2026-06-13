@@ -128,6 +128,10 @@ test("documentation describes the supported security and recovery boundary", asy
     "RELAY_HOST",
     "RELAY_PORT",
     "RELAY_STATE_FILE",
+    "RELAY_ASSET_DIR",
+    "RELAY_MAX_ASSET_BYTES",
+    "RELAY_ASSET_RETENTION_MS",
+    "RELAY_ASSET_GRANT_TTL_MS",
     "RELAY_PUBLIC_ORIGIN",
     "RELAY_TLS_CERT_FILE",
     "RELAY_TLS_KEY_FILE",
@@ -140,6 +144,8 @@ test("documentation describes the supported security and recovery boundary", asy
   assert.match(readme, /no production hosted relay bundled/i);
   assert.match(readme, /npm run relay:start/i);
   assert.match(readme, /npm run relay:bootstrap/i);
+  assert.match(readme, /room-scoped asset ID/i);
+  assert.match(readme, /membership bearer session/i);
 });
 
 test("relay configuration fails closed unless it is complete and secure", async () => {

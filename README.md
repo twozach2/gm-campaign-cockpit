@@ -21,8 +21,8 @@ Three operating modes are available:
 
 Local and trusted-LAN modes are ready for normal campaign use. The hosted relay
 implements accounts, device pairing, rooms, invites, and the remote player
-screen, but still requires a development deployment and does not yet relay
-images.
+screen, including explicitly revealed raster images. It still requires a
+development deployment rather than direct public exposure.
 
 ## Requirements
 
@@ -215,6 +215,7 @@ or alter an ID to select another file.
 | Presentation, chat, DM/player sessions | Server memory | Reset on restart |
 | Player name/session and DM layout | Browser local storage | Per browser |
 | Hosted accounts, devices, rooms, and memberships | `RELAY_STATE_FILE` | Persistent and atomic |
+| Hosted revealed image bytes and grants | `RELAY_ASSET_DIR` | Deleted at room end or after retention |
 | Hosted player room session | Browser local storage | Per browser and relay origin |
 
 Tracker writes use a queued atomic replacement. If stored tracker JSON is
@@ -273,11 +274,18 @@ bounded player-safe room projections in a versioned atomic JSON file. Account
 passphrases and device, invite, and membership secrets are stored only as
 password hashes or capability hashes.
 
-The connector publishes only player-safe room projections: explicit text/card
-reveals, visible trackers, scoped chat, and public player identities. Vault
-paths, campaign manuscripts, session notes, local credentials, hidden trackers,
-and secret rolls are rejected at the protocol boundary. Local image reveals
-are omitted until the separate opaque asset-upload service is implemented.
+The connector publishes only player-safe room projections: explicit text,
+card, and image reveals; visible trackers; scoped chat; and public player
+identities. Vault paths, campaign manuscripts, session notes, local
+credentials, hidden trackers, and secret rolls are rejected at the protocol
+boundary.
+
+For an image reveal, the local cockpit verifies the raster signature and size,
+requests a short-lived one-time upload grant, and uploads the bytes over TLS.
+The hosted presentation contains only an opaque room-scoped asset ID. Remote
+players fetch the image with their membership bearer session; asset tokens are
+never placed in URLs. Assets are removed when retracted, when the room ends, or
+when their configured retention period expires.
 
 ### 1. Start The Relay
 
@@ -289,7 +297,10 @@ npm run relay:start
 
 Development defaults are `127.0.0.1:8787` and
 `relay/data/relay.json`. Configure `RELAY_STATE_FILE` to place the persistent
-relay database elsewhere.
+relay database elsewhere. Hosted image bytes default to an `assets` directory
+beside that file. Configure `RELAY_ASSET_DIR`, `RELAY_MAX_ASSET_BYTES`,
+`RELAY_ASSET_RETENTION_MS`, and `RELAY_ASSET_GRANT_TTL_MS` to change the asset
+storage and limits.
 
 Public traffic requires HTTPS/WSS. Configure both `RELAY_TLS_CERT_FILE` and
 `RELAY_TLS_KEY_FILE`, or run the service behind a trusted managed TLS proxy.
@@ -365,17 +376,14 @@ capability privately. Remote players open
 name.
 
 The browser receives a room-scoped session and reconnects through the hosted
-player WebSocket. The remote screen supports text and card reveals, visible
-trackers, table chat, dice rolls, whispers with the DM, player presence,
-rename, leave, and snapshot recovery. Duplicate display names remain separate
-identities.
+player WebSocket. The remote screen supports text and card reveals, verified
+raster image reveals, visible trackers, table chat, dice rolls, whispers with
+the DM, player presence, rename, leave, and snapshot recovery. Duplicate
+display names remain separate identities.
 
 The account dashboard can close joins, rotate a compromised invite, remove a
 player, revoke a paired device, or end the room. Those actions invalidate the
 corresponding remote access.
-
-Hosted image reveals remain disabled until the opaque asset service in
-P2-WP6 is implemented. Local and LAN image reveals continue to work normally.
 
 ### Service Boundaries
 
@@ -387,15 +395,17 @@ Available service boundaries:
 - Hosted player interface at `/player/`
 - Account-session and room-control routes under `/v1/admin/`
 - `POST /v1/devices/pair` and `GET /v1/device/state`
+- `POST /v1/device/assets/grants`
+- `PUT /v1/assets/upload/<asset-id>`
+- `GET /v1/assets/<asset-id>` and `DELETE /v1/device/assets/<asset-id>`
 - `WS /v1/agent/<room-id>`
 - `WS /v1/player/<room-id>`
 
 There is no production hosted relay bundled with this repository yet. Before
-general public use, the development service still needs an asset service, a
-production database and backup policy, stronger deployment limits, monitoring,
-account recovery and administration, abuse controls, and a dedicated security
-review. Treat the current relay as a controlled development or private test
-deployment.
+general public use, the development service still needs a production database
+and backup policy, stronger deployment limits, monitoring, account recovery
+and administration, abuse controls, and a dedicated security review. Treat the
+current relay as a controlled development or private test deployment.
 
 ## Validation
 
