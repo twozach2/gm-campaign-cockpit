@@ -6,9 +6,23 @@ trackers, chat, rolls, and whispers without moving campaign content into a
 database.
 
 The local cockpit is hardened for one computer or a trusted local network. It
-is not designed to be exposed directly to the public internet. The repository
-also contains an experimental, separately-run hosted relay skeleton for
-continued development of worldwide player access.
+is not designed to be exposed directly to the public internet. For remote
+players, the repository also includes a separately deployed hosted relay. The
+local cockpit connects outward to that relay, so campaign files and the local
+server remain private.
+
+Three operating modes are available:
+
+| Mode | Intended use | Player address |
+|---|---|---|
+| Local | DM and player display on one computer | `http://127.0.0.1:4173/player.html` |
+| Trusted LAN | Devices on the same private network | `http://<server-lan-address>:4173/player.html` |
+| Hosted relay | Remote players over the internet | `https://<relay-host>/player/` |
+
+Local and trusted-LAN modes are ready for normal campaign use. The hosted relay
+implements accounts, device pairing, rooms, invites, and the remote player
+screen, but still requires a development deployment and does not yet relay
+images.
 
 ## Requirements
 
@@ -107,9 +121,9 @@ Open the player screen at:
 http://<server-lan-address>:<port>/player.html
 ```
 
-Do not port-forward this server, place it on an untrusted network, or expose it
-through a public reverse proxy. Phase One does not provide public accounts,
-TLS termination, hosted room isolation, or an internet relay.
+Do not port-forward the local cockpit, place it on an untrusted network, or
+expose it through a public reverse proxy. Use the separately deployed hosted
+relay for internet players.
 
 ## Campaign File Contract
 
@@ -197,16 +211,20 @@ or alter an ID to select another file.
 | Session notes | Campaign `Session Notes Workbook.md` | Persistent |
 | Notes backups | Application `data/backups/<Campaign>/` | Newest 25 retained |
 | Tracker state | `STATE_DIR/trackers.json` | Persistent and atomic |
+| Hosted relay device pairing | `STATE_DIR/relay-device.json` | Persistent until unpaired |
 | Presentation, chat, DM/player sessions | Server memory | Reset on restart |
 | Player name/session and DM layout | Browser local storage | Per browser |
+| Hosted accounts, devices, rooms, and memberships | `RELAY_STATE_FILE` | Persistent and atomic |
+| Hosted player room session | Browser local storage | Per browser and relay origin |
 
 Tracker writes use a queued atomic replacement. If stored tracker JSON is
 malformed, it is renamed with a `.corrupt` suffix and the server starts with an
 empty tracker list. Failed tracker writes roll back the in-memory mutation.
 
-For a complete backup, preserve both `VAULT_ROOT` and `STATE_DIR`. The notes
-backup folder is under the application `data` folder unless the application
-itself is included in that backup.
+For a complete local cockpit backup, preserve both `VAULT_ROOT` and
+`STATE_DIR`. The notes backup folder is under the application `data` folder
+unless the application itself is included in that backup. A hosted relay
+deployment must also back up `RELAY_STATE_FILE`.
 
 ## Health And Recovery
 
@@ -241,17 +259,19 @@ identifiers, whispers, notes, campaign contents, and filesystem paths.
 - Active content is served as a sandboxed download rather than inline.
 - Internal server failures return generic responses without filesystem paths.
 
-These controls reduce risk on a trusted LAN. They do not replace TLS, public
-identity, tenant isolation, a cloud database, or an internet-facing gateway.
+These controls reduce risk on a trusted LAN. They do not make the local
+cockpit an internet-facing server. Remote access must go through the hosted
+relay over HTTPS/WSS.
 
-## Experimental Hosted Relay
+## Hosted Relay
 
-The `relay/` service is a Phase Two development skeleton, not a production
-deployment. It keeps the local cockpit authoritative and accepts the agent's
-outbound `wss://` connection plus room-scoped player connections. It stores
-accounts, devices, rooms, invites, memberships, and bounded player-safe room
-projections in a versioned atomic JSON file. Device, invite, and membership
-secrets are stored only as hashes.
+The `relay/` service is a working Phase Two development implementation, not a
+production deployment. It keeps the local cockpit authoritative and accepts
+the cockpit's outbound `wss://` connection plus room-scoped player
+connections. It stores accounts, devices, rooms, invites, memberships, and
+bounded player-safe room projections in a versioned atomic JSON file. Account
+passphrases and device, invite, and membership secrets are stored only as
+password hashes or capability hashes.
 
 The connector publishes only player-safe room projections: explicit text/card
 reveals, visible trackers, scoped chat, and public player identities. Vault
@@ -259,7 +279,32 @@ paths, campaign manuscripts, session notes, local credentials, hidden trackers,
 and secret rolls are rejected at the protocol boundary. Local image reveals
 are omitted until the separate opaque asset-upload service is implemented.
 
-Create a development account, device, room, and invite:
+### 1. Start The Relay
+
+For local development, start the relay as a separate process:
+
+```bash
+npm run relay:start
+```
+
+Development defaults are `127.0.0.1:8787` and
+`relay/data/relay.json`. Configure `RELAY_STATE_FILE` to place the persistent
+relay database elsewhere.
+
+Public traffic requires HTTPS/WSS. Configure both `RELAY_TLS_CERT_FILE` and
+`RELAY_TLS_KEY_FILE`, or run the service behind a trusted managed TLS proxy.
+When using a proxy, set:
+
+```text
+RELAY_PUBLIC_ORIGIN=https://relay.example.com
+```
+
+The public origin controls same-origin checks and secure account cookies.
+
+### 2. Create The First Account
+
+The relay has no public account-registration endpoint. Initialize the first
+development account from the relay host:
 
 ```powershell
 $env:RELAY_BOOTSTRAP_PASSPHRASE = "choose-a-long-account-passphrase"
@@ -268,37 +313,38 @@ npm run relay:bootstrap -- "dm@example.com" "Campaign laptop" "Tuesday table"
 
 On macOS or Linux, use
 `export RELAY_BOOTSTRAP_PASSPHRASE="choose-a-long-account-passphrase"`.
-The command prints the device token, room ID, and invite token once.
+The command creates the account plus an initial device, room, and invite. It
+prints the device token, room ID, and invite token once. Keep those
+capabilities private.
 
 Open the relay root URL in a browser and sign in with the email and passphrase.
 The account dashboard can generate one-time device pairing codes, list and
 revoke devices, create and end rooms, open or close joins, rotate invites, and
 remove players.
 
-Remote players open `https://relay.example.com/player/`, enter the current
-invite capability, and choose a display name. The browser receives a
-room-scoped session and reconnects through the hosted player WebSocket. The
-remote screen supports text and card reveals, visible trackers, table chat,
-dice rolls, whispers with the DM, player presence, rename, leave, and snapshot
-recovery. Duplicate display names remain separate identities.
+### 3. Pair The Local Cockpit
 
-Hosted image reveals remain disabled until the opaque asset service in
-P2-WP6 is implemented. Local and LAN image reveals continue to work normally.
-
-For the normal pairing flow, configure only the relay's public control origin
-in the local cockpit:
+For the normal browser-guided pairing flow, configure only the relay's public
+control origin in the local cockpit:
 
 ```text
 RELAY_CONTROL_URL=https://relay.example.com
 ```
 
-Open **Hosted relay** in the local cockpit header, redeem a pairing code, then
-choose a room assigned to that device. The device token is written to
-`STATE_DIR/relay-device.json` with restricted file permissions and is never
-returned to the browser.
+Restart the local cockpit, then:
 
-The original environment-managed connector remains available for development
-or managed installations:
+1. Sign in to the hosted relay account page.
+2. Generate a one-time device pairing code. It expires after ten minutes.
+3. Open **Hosted relay** in the local cockpit header.
+4. Enter the pairing code and a name for the campaign computer.
+5. In the relay account dashboard, create a room assigned to that device.
+6. In the local cockpit, select the assigned room.
+
+The local cockpit stores the resulting device capability in
+`STATE_DIR/relay-device.json` with restricted file permissions. The token is
+never returned to browser JavaScript or placed in a URL.
+
+For managed installations, the connector can instead be configured directly:
 
 ```text
 RELAY_URL=wss://relay.example.com/v1/agent/<room-id>
@@ -307,21 +353,31 @@ RELAY_ROOM_ID=<room-id>
 RELAY_DEVICE_TOKEN=<device-token>
 ```
 
-The connector is disabled unless all four values are present. Start the relay
-as a separate process:
+The connector is disabled unless all four managed values are present. Do not
+combine managed connector values with browser-guided pairing. In either mode,
+the local cockpit remains private and opens no inbound internet connection.
 
-```bash
-npm run relay:start
-```
+### 4. Invite Remote Players
 
-Development defaults are `127.0.0.1:8787` and
-`relay/data/relay.json`. Configure `RELAY_STATE_FILE` for durable storage.
-Public traffic requires HTTPS/WSS: either configure both
-`RELAY_TLS_CERT_FILE` and `RELAY_TLS_KEY_FILE`, or put the relay behind a
-trusted managed TLS proxy. When using a proxy, set
-`RELAY_PUBLIC_ORIGIN=https://relay.example.com` so same-origin and secure-cookie
-checks use the external origin. The local cockpit server remains private and
-opens no inbound internet connection.
+Create a room from the relay account dashboard and share its current invite
+capability privately. Remote players open
+`https://relay.example.com/player/`, enter the invite, and choose a display
+name.
+
+The browser receives a room-scoped session and reconnects through the hosted
+player WebSocket. The remote screen supports text and card reveals, visible
+trackers, table chat, dice rolls, whispers with the DM, player presence,
+rename, leave, and snapshot recovery. Duplicate display names remain separate
+identities.
+
+The account dashboard can close joins, rotate a compromised invite, remove a
+player, revoke a paired device, or end the room. Those actions invalidate the
+corresponding remote access.
+
+Hosted image reveals remain disabled until the opaque asset service in
+P2-WP6 is implemented. Local and LAN image reveals continue to work normally.
+
+### Service Boundaries
 
 Available service boundaries:
 
@@ -335,9 +391,11 @@ Available service boundaries:
 - `WS /v1/player/<room-id>`
 
 There is no production hosted relay bundled with this repository yet. Before
-public use, this skeleton still needs an asset service, a production database
-and backups, stronger deployment limits, monitoring, and a dedicated security
-review. Local and trusted-LAN modes remain the supported ways to run a session.
+general public use, the development service still needs an asset service, a
+production database and backup policy, stronger deployment limits, monitoring,
+account recovery and administration, abuse controls, and a dedicated security
+review. Treat the current relay as a controlled development or private test
+deployment.
 
 ## Validation
 
