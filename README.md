@@ -25,15 +25,33 @@ screen, including explicitly revealed raster images. It includes a managed-TLS
 deployment example and operational tooling for a controlled private pilot, but
 still requires the security review described below before broad public use.
 
-## Requirements
+## Before You Start
 
-- A current Node.js LTS release, version 20.12 or newer.
-- Campaign files stored locally or in a locally synchronized folder.
-- No `npm install` step is required.
+You need one free program called **Node.js** — think of it as the engine that
+runs the cockpit on your computer. You don't need to understand it; you just
+install it once.
+
+1. Go to <https://nodejs.org>.
+2. Download the version marked **LTS** — that's the large green button. ("LTS"
+   simply means the stable, recommended release.) Any version 20.12 or newer
+   works.
+3. Open the downloaded file and click through the installer, accepting the
+   default options.
+
+That's the only software you need to install. There is no other setup step, and
+you never have to run a command like `npm install`.
+
+You'll also need your campaign written as Markdown files (plain-text files
+ending in `.md`), stored on your computer or in a synced folder such as Dropbox
+or iCloud. The layout is described in the Campaign File Contract below.
 
 ## Quick Start
 
-Place the application folder beside your campaign folders:
+### Step 1 — Put the cockpit next to your campaigns
+
+Place the application folder beside your campaign folders. Your **vault** is
+just the folder that holds all your campaigns — in the example below, that's
+`Dungeons_and_Dragons`.
 
 ```text
 Dungeons_and_Dragons/
@@ -45,36 +63,46 @@ Dungeons_and_Dragons/
     `-- Director's Guide.md
 ```
 
-With that layout, the default vault is the folder above the application and no
-configuration is required.
+With that layout, the cockpit automatically treats the folder above it as your
+vault, so there's nothing to configure.
 
-### Windows
+### Step 2 — Start it (the easy, no-typing way)
 
-Run `Start GM Cockpit.ps1`.
+**On Windows:** double-click `Start GM Cockpit.ps1`.
 
-If PowerShell blocks local scripts, open PowerShell in the application folder
-and run:
+If Windows blocks the script, open PowerShell in the application folder and run:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ".\Start GM Cockpit.ps1"
 ```
 
-### macOS
+**On macOS:** double-click `Start GM Cockpit Mac.command`.
 
-Double-click `Start GM Cockpit Mac.command`. If macOS removed its executable
-permission, run this once:
+If macOS says the file can't be opened or isn't executable, open the **Terminal**
+app once and run this (replace the path with wherever you put the folder):
 
 ```bash
 chmod +x "/path/to/GM Campaign Cockpit/Start GM Cockpit Mac.command"
 ```
 
-### Terminal
+### Step 3 — Use it
+
+A small window opens and your web browser loads the cockpit automatically at
+<http://127.0.0.1:4173>. If the browser doesn't open on its own, open it
+yourself and go to that address.
+
+To stop the cockpit, close the small window (Windows) or Terminal window
+(macOS) that opened when you started it.
+
+### Prefer the command line?
+
+If you're comfortable with a terminal, you can start it directly instead:
 
 ```bash
 npm start
 ```
 
-Open <http://127.0.0.1:4173>.
+Then open <http://127.0.0.1:4173>.
 
 ## Configuration
 
@@ -104,7 +132,9 @@ The local browser receives a DM session automatically.
 
 ### Trusted-LAN mode
 
-To let players and a DM browser on the same trusted network connect, set:
+"LAN" means a local network — for example, the Wi-Fi in your home. This mode
+lets other people on that same private network open the player screen on their
+own devices. To enable it, set:
 
 ```text
 HOST=0.0.0.0
@@ -266,6 +296,11 @@ cockpit an internet-facing server. Remote access must go through the hosted
 relay over HTTPS/WSS.
 
 ## Hosted Relay
+
+> **For technical operators.** This section is about deploying an
+> internet-facing server, with TLS certificates and command-line tools. If you
+> only want to play on one computer or over your home network, you can stop
+> here — the sections above are everything you need.
 
 The `relay/` service is a working Phase Two private-pilot implementation. It
 keeps the local cockpit authoritative and accepts the cockpit's outbound
