@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
@@ -12,6 +12,7 @@ import {
   RELAY_PROTOCOL_VERSION,
 } from "../../lib/relay-protocol.mjs";
 import { createLogger } from "../../lib/logger.mjs";
+import { TokenBucketRateLimiter } from "../../lib/rate-limit.mjs";
 import {
   decodePlayerEnvelope,
   playerEnvelope,
@@ -33,6 +34,22 @@ const MAX_PENDING_COMMANDS = 2_000;
 const COMMAND_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_ASSET_BYTES = 25 * 1024 * 1024;
 const ASSET_PRUNE_INTERVAL_MS = 60_000;
+const DEFAULT_LIMITS = Object.freeze({
+  httpPerIp: { capacity: 300, windowMs: 60_000 },
+  loginPerIp: { capacity: 10, windowMs: 15 * 60_000 },
+  loginPerAccount: { capacity: 10, windowMs: 15 * 60_000 },
+  invitePerIp: { capacity: 30, windowMs: 60_000 },
+  invitePerToken: { capacity: 20, windowMs: 60_000 },
+  pairingPerIp: { capacity: 30, windowMs: 60_000 },
+  adminMutationPerAccount: { capacity: 120, windowMs: 60_000 },
+  deviceRead: { capacity: 240, windowMs: 60_000 },
+  deviceMutation: { capacity: 120, windowMs: 60_000 },
+  playerRead: { capacity: 240, windowMs: 60_000 },
+  websocketPerIp: { capacity: 30, windowMs: 60_000 },
+  agentMessage: { capacity: 600, windowMs: 60_000 },
+  playerCommand: { capacity: 60, windowMs: 10_000 },
+  roomCommand: { capacity: 300, windowMs: 10_000 },
+});
 const defaultPublicRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "..",
@@ -46,6 +63,16 @@ function identifier(prefix) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+function hashKey(value) {
+  return createHash("sha256").update(String(value)).digest("base64url");
+}
+
+function equalSecret(left, right) {
+  const a = createHash("sha256").update(String(left)).digest();
+  const b = createHash("sha256").update(String(right)).digest();
+  return timingSafeEqual(a, b);
 }
 
 function json(response, status, value, headers = {}) {
@@ -254,6 +281,11 @@ export class HostedRelayService {
     accountAuth,
     assetStore,
     maxAssetBytes = DEFAULT_MAX_ASSET_BYTES,
+    rateLimiter,
+    rateLimits = {},
+    maxLimiterKeys = 10_000,
+    trustProxy = false,
+    metricsToken = "",
     publicRoot = defaultPublicRoot,
     appPublicRoot = defaultAppPublicRoot,
     now = () => Date.now(),
@@ -285,6 +317,25 @@ export class HostedRelayService {
         now,
       });
     this.maxAssetBytes = maxAssetBytes;
+    this.rateLimiter =
+      rateLimiter ||
+      new TokenBucketRateLimiter({
+        now,
+        maxKeys: maxLimiterKeys,
+      });
+    this.rateLimits = { ...DEFAULT_LIMITS, ...rateLimits };
+    this.trustProxy = trustProxy;
+    this.metricsToken = metricsToken;
+    this.metrics = {
+      requests: 0,
+      rateLimited: 0,
+      requestErrors: 0,
+      assetUploads: 0,
+      assetBytes: 0,
+      playerCommands: 0,
+      agentMessages: 0,
+      auditEvents: 0,
+    };
     this.publicRoot = path.resolve(publicRoot);
     this.appPublicRoot = path.resolve(appPublicRoot);
     this.ready = false;
@@ -376,9 +427,17 @@ export class HostedRelayService {
 
   async handleHttp(request, response) {
     securityHeaders(response);
+    this.metrics.requests += 1;
     let url;
     try {
       url = new URL(request.url, `http://${request.headers.host || "relay"}`);
+      if (!["/health", "/readiness"].includes(url.pathname)) {
+        this.consumeLimit(
+          "http-ip",
+          this.clientIp(request),
+          this.rateLimits.httpPerIp,
+        );
+      }
       if (request.method === "GET" && staticFiles.has(url.pathname)) {
         return this.serveStatic(response, url.pathname);
       }
@@ -391,6 +450,15 @@ export class HostedRelayService {
           checks: { persistence: this.ready ? "ready" : "unavailable" },
         });
       }
+      if (request.method === "GET" && url.pathname === "/metrics") {
+        if (
+          !this.metricsToken ||
+          !equalSecret(bearer(request), this.metricsToken)
+        ) {
+          return json(response, 404, { error: "Not found" });
+        }
+        return json(response, 200, this.operationalMetrics());
+      }
       if (request.method === "GET" && url.pathname === "/v1/admin/session") {
         const session = this.adminSession(request);
         if (!session) {
@@ -400,18 +468,33 @@ export class HostedRelayService {
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/login") {
         this.requireSameOrigin(request);
+        this.consumeLimit(
+          "login-ip",
+          this.clientIp(request),
+          this.rateLimits.loginPerIp,
+        );
         const body = exactObject(
           await readJson(request),
           ["email", "passphrase"],
           "Account login",
+        );
+        this.consumeLimit(
+          "login-account",
+          hashKey(String(body.email || "").trim().toLowerCase()),
+          this.rateLimits.loginPerAccount,
         );
         const authenticated = this.accountAuth.login(
           requiredString(body.email, "Email", 320),
           requiredString(body.passphrase, "Passphrase", 512),
         );
         if (!authenticated) {
+          this.audit("admin.login", { result: "denied" });
           return json(response, 401, { error: "Invalid account credentials" });
         }
+        this.audit("admin.login", {
+          result: "accepted",
+          accountId: authenticated.account.id,
+        });
         return json(
           response,
           200,
@@ -431,6 +514,7 @@ export class HostedRelayService {
       if (request.method === "POST" && url.pathname === "/v1/admin/logout") {
         const session = this.requireAdminMutation(request);
         this.accountAuth.revoke(session.token);
+        this.audit("admin.logout", { accountId: session.account.id });
         return json(
           response,
           200,
@@ -459,10 +543,19 @@ export class HostedRelayService {
               max: 3_600_000,
             }) ?? 10 * 60 * 1_000,
         });
+        this.audit("pairing.created", {
+          accountId: session.account.id,
+          pairingId: pairing.pairing.id,
+        });
         return json(response, 201, pairing);
       }
       if (request.method === "POST" && url.pathname === "/v1/devices/pair") {
         this.rejectCrossOrigin(request);
+        this.consumeLimit(
+          "pairing-ip",
+          this.clientIp(request),
+          this.rateLimits.pairingPerIp,
+        );
         const body = exactObject(
           await readJson(request),
           ["pairingToken", "deviceName"],
@@ -472,6 +565,10 @@ export class HostedRelayService {
           token: requiredString(body.pairingToken, "Pairing token", 512),
           name: requiredString(body.deviceName, "Device name", 80),
         });
+        this.audit("pairing.redeemed", {
+          accountId: paired.account.id,
+          deviceId: paired.device.id,
+        });
         return json(response, 201, paired);
       }
       if (request.method === "GET" && url.pathname === "/v1/device/state") {
@@ -479,6 +576,11 @@ export class HostedRelayService {
         if (!device) {
           return json(response, 401, { error: "Device session required" });
         }
+        this.consumeLimit(
+          "device-read",
+          device.id,
+          this.rateLimits.deviceRead,
+        );
         return json(response, 200, {
           device,
           rooms: this.store
@@ -495,6 +597,11 @@ export class HostedRelayService {
         if (!device) {
           return json(response, 401, { error: "Device session required" });
         }
+        this.consumeLimit(
+          "device-mutation",
+          device.id,
+          this.rateLimits.deviceMutation,
+        );
         const body = exactObject(
           await readJson(request),
           ["roomId", "contentType", "byteLength", "sha256"],
@@ -510,6 +617,12 @@ export class HostedRelayService {
           contentType: requiredString(body.contentType, "Content type", 80),
           byteLength: body.byteLength,
           sha256: requiredString(body.sha256, "Asset digest", 80),
+        });
+        this.audit("asset.grant_created", {
+          deviceId: device.id,
+          roomId,
+          assetId: grant.assetId,
+          bytes: body.byteLength,
         });
         return json(response, 201, grant);
       }
@@ -534,6 +647,14 @@ export class HostedRelayService {
           contentType,
           content,
         });
+        this.metrics.assetUploads += 1;
+        this.metrics.assetBytes += content.length;
+        this.audit("asset.uploaded", {
+          deviceId: grant.deviceId,
+          roomId: grant.roomId,
+          assetId: asset.id,
+          bytes: content.length,
+        });
         return json(response, 201, { asset });
       }
       const deviceAssetId = routeId(url.pathname, "/v1/device/assets/");
@@ -543,6 +664,11 @@ export class HostedRelayService {
         if (!device) {
           return json(response, 401, { error: "Device session required" });
         }
+        this.consumeLimit(
+          "device-mutation",
+          device.id,
+          this.rateLimits.deviceMutation,
+        );
         const existing = this.assetStore.asset(deviceAssetId);
         if (
           !existing ||
@@ -554,6 +680,11 @@ export class HostedRelayService {
           assetId: deviceAssetId,
           deviceId: device.id,
         });
+        this.audit("asset.deleted", {
+          deviceId: device.id,
+          roomId: asset.roomId,
+          assetId: asset.id,
+        });
         return json(response, 200, { asset });
       }
       const playerAssetId = routeId(url.pathname, "/v1/assets/");
@@ -562,6 +693,11 @@ export class HostedRelayService {
         if (!membership) {
           return json(response, 401, { error: "Player session required" });
         }
+        this.consumeLimit(
+          "player-read",
+          membership.id,
+          this.rateLimits.playerRead,
+        );
         const result = await this.assetStore.readAsset(
           playerAssetId,
           membership.roomId,
@@ -600,6 +736,10 @@ export class HostedRelayService {
           rooms.map((room) => this.cleanupRoomAssets(room.id)),
         );
         this.disconnectDevice(device.id);
+        this.audit("device.revoked", {
+          accountId: session.account.id,
+          deviceId: device.id,
+        });
         return json(response, 200, { device });
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/rooms") {
@@ -615,6 +755,11 @@ export class HostedRelayService {
           name: requiredString(body.name, "Room name", 120),
         });
         const invite = await this.store.createInvite({ roomId: room.id });
+        this.audit("room.created", {
+          accountId: session.account.id,
+          deviceId: room.agentDeviceId,
+          roomId: room.id,
+        });
         return json(response, 201, { room, invite });
       }
       if (
@@ -633,6 +778,11 @@ export class HostedRelayService {
           body.joinsOpen,
         );
         this.sendMembership(room.id);
+        this.audit("room.joins_updated", {
+          accountId: session.account.id,
+          roomId: room.id,
+          joinsOpen: room.joinsOpen,
+        });
         return json(response, 200, { room });
       }
       if (
@@ -651,6 +801,10 @@ export class HostedRelayService {
         );
         await this.cleanupRoomAssets(room.id);
         this.disconnectRoom(room.id, "Room ended");
+        this.audit("room.ended", {
+          accountId: session.account.id,
+          roomId: room.id,
+        });
         return json(response, 200, { room });
       }
       if (
@@ -677,6 +831,11 @@ export class HostedRelayService {
             }),
           },
         );
+        this.audit("invite.rotated", {
+          accountId: session.account.id,
+          roomId: invite.invite.roomId,
+          inviteId: invite.invite.id,
+        });
         return json(response, 201, invite);
       }
       if (
@@ -696,19 +855,38 @@ export class HostedRelayService {
         );
         this.disconnectMembership(membership.id);
         this.sendMembership(membership.roomId);
+        this.audit("membership.removed", {
+          accountId: session.account.id,
+          roomId: membership.roomId,
+          membershipId: membership.id,
+        });
         return json(response, 200, { membership });
       }
       if (request.method === "POST" && url.pathname === "/v1/invites/redeem") {
+        this.consumeLimit(
+          "invite-ip",
+          this.clientIp(request),
+          this.rateLimits.invitePerIp,
+        );
         const body = exactObject(
           await readJson(request),
           ["inviteToken", "displayName"],
           "Invite redemption",
+        );
+        this.consumeLimit(
+          "invite-token",
+          hashKey(body.inviteToken),
+          this.rateLimits.invitePerToken,
         );
         const joined = await this.store.redeemInvite({
           token: body.inviteToken,
           displayName: body.displayName,
         });
         this.sendMembership(joined.room.id);
+        this.audit("invite.redeemed", {
+          roomId: joined.room.id,
+          membershipId: joined.membership.id,
+        });
         return json(response, 200, joined);
       }
       if (
@@ -719,6 +897,11 @@ export class HostedRelayService {
         if (!membership) {
           return json(response, 401, { error: "Player session required" });
         }
+        this.consumeLimit(
+          "player-read",
+          membership.id,
+          this.rateLimits.playerRead,
+        );
         const room = this.store.room(membership.roomId);
         const state = this.store.roomState(membership.roomId);
         if (!room || room.status !== "active" || !state) {
@@ -736,16 +919,24 @@ export class HostedRelayService {
       return json(response, 404, { error: "Not found" });
     } catch (error) {
       const status = error.status || 500;
+      this.metrics.requestErrors += 1;
       if (status >= 500) {
         this.logger.error("hosted_relay_request_failed", {
           route: url?.pathname || "unparsed",
           error,
         });
       }
-      return json(response, status, {
-        error: status >= 500 ? "Internal server error" : error.message,
-        ...(status < 500 && error.code ? { code: error.code } : {}),
-      });
+      return json(
+        response,
+        status,
+        {
+          error: status >= 500 ? "Internal server error" : error.message,
+          ...(status < 500 && error.code ? { code: error.code } : {}),
+        },
+        error.retryAfterSeconds
+          ? { "Retry-After": String(error.retryAfterSeconds) }
+          : {},
+      );
     }
   }
 
@@ -823,7 +1014,65 @@ export class HostedRelayService {
     ) {
       throw requestError("Invalid CSRF token", 403, "CSRF_REJECTED");
     }
+    this.consumeLimit(
+      "admin-mutation",
+      session.account.id,
+      this.rateLimits.adminMutationPerAccount,
+    );
     return { ...session, token };
+  }
+
+  clientIp(request) {
+    if (this.trustProxy) {
+      const forwarded = String(request.headers["x-forwarded-for"] || "")
+        .split(",")[0]
+        .trim();
+      if (forwarded) return forwarded.slice(0, 80);
+    }
+    return String(request.socket.remoteAddress || "unknown").slice(0, 80);
+  }
+
+  consumeLimit(bucket, key, policy) {
+    const result = this.rateLimiter.consume(bucket, key || "unknown", policy);
+    if (result.allowed) return result;
+    this.metrics.rateLimited += 1;
+    const audit = this.rateLimiter.consume(
+      "audit-rate-limit",
+      bucket,
+      { capacity: 1, windowMs: 60_000 },
+    );
+    if (audit.allowed) this.audit("rate_limit.exceeded", { bucket });
+    const error = requestError(
+      "Too many requests",
+      429,
+      "RATE_LIMITED",
+    );
+    error.retryAfterSeconds = result.retryAfterSeconds;
+    throw error;
+  }
+
+  audit(action, details = {}) {
+    this.metrics.auditEvents += 1;
+    this.logger.info("relay_audit", { action, ...details });
+  }
+
+  operationalMetrics() {
+    const store = this.store.stats();
+    const assets = this.assetStore.stats();
+    return {
+      generatedAt: this.now(),
+      uptimeSeconds: Math.floor(process.uptime()),
+      requests: clone(this.metrics),
+      connections: {
+        agents: this.agents.size,
+        players: [...this.players.values()].reduce(
+          (total, entries) => total + entries.size,
+          0,
+        ),
+        pendingCommands: this.pendingCommands.size,
+      },
+      records: { ...store, ...assets },
+    };
   }
 
   adminState(accountId) {
@@ -879,6 +1128,16 @@ export class HostedRelayService {
   }
 
   handleUpgrade(request, socket, head) {
+    try {
+      this.consumeLimit(
+        "websocket-ip",
+        this.clientIp(request),
+        this.rateLimits.websocketPerIp,
+      );
+    } catch (error) {
+      rejectUpgrade(socket, 429, "Too many connection attempts");
+      return;
+    }
     if (!this.ready || this.connectionCount() >= MAX_CONNECTIONS) {
       rejectUpgrade(socket, 503, "Relay unavailable");
       return;
@@ -955,6 +1214,12 @@ export class HostedRelayService {
   }
 
   async handleAgentMessage(session, encoded) {
+    this.consumeLimit(
+      "agent-message",
+      session.device.id,
+      this.rateLimits.agentMessage,
+    );
+    this.metrics.agentMessages += 1;
     const message = decodeRelayEnvelope(encoded, {
       direction: "agent-to-relay",
     });
@@ -1087,6 +1352,17 @@ export class HostedRelayService {
 
   async handlePlayerMessage(session, encoded) {
     const message = decodePlayerEnvelope(encoded);
+    this.consumeLimit(
+      "player-command",
+      session.membership.id,
+      this.rateLimits.playerCommand,
+    );
+    this.consumeLimit(
+      "room-command",
+      session.room.id,
+      this.rateLimits.roomCommand,
+    );
+    this.metrics.playerCommands += 1;
     if (message.roomId !== session.room.id) {
       throw requestError("Player message belongs to another room", 403, "ROOM_FORBIDDEN");
     }
@@ -1170,6 +1446,10 @@ export class HostedRelayService {
     } else if (result.accepted && pending.commandType === "player.leave") {
       await this.store.revokeMembership(pending.session.membership.id);
       this.sendMembership(roomId);
+      this.audit("membership.self_removed", {
+        roomId,
+        membershipId: pending.session.membership.id,
+      });
     }
     const playerResult = this.playerResult(
       pending.session,

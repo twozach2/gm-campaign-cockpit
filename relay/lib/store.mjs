@@ -21,6 +21,14 @@ import {
 const MAX_RECORDS = 10_000;
 const MAX_ROOM_CHAT = 200;
 const MIN_PASSPHRASE_LENGTH = 10;
+const DEFAULT_CAPACITY = Object.freeze({
+  accounts: 1_000,
+  devicesPerAccount: 20,
+  activeRoomsPerAccount: 20,
+  activeInvitesPerRoom: 5,
+  activeMembershipsPerRoom: 200,
+  pendingPairingsPerAccount: 10,
+});
 
 function clone(value) {
   return structuredClone(value);
@@ -52,6 +60,10 @@ function error(message, code, status = 400) {
   return Object.assign(new Error(message), { code, status });
 }
 
+function enforceCapacity(count, maximum, message, code) {
+  if (count >= maximum) throw error(message, code, 409);
+}
+
 function active(record, now) {
   return (
     record &&
@@ -77,7 +89,7 @@ function unique(records, key) {
   return new Set(values).size === values.length;
 }
 
-function validDatabase(value) {
+export function validRelayDatabase(value) {
   if (
     !value ||
     typeof value !== "object" ||
@@ -321,11 +333,13 @@ export class RelayStore {
     randomId = id,
     randomSecret = secret,
     logger,
+    capacity = {},
   }) {
     this.now = now;
     this.randomId = randomId;
     this.randomSecret = randomSecret;
     this.logger = logger;
+    this.capacity = { ...DEFAULT_CAPACITY, ...capacity };
     this.database = emptyRelayDatabase();
     this.tail = Promise.resolve();
     this.store = new AtomicJsonStore({
@@ -342,7 +356,7 @@ export class RelayStore {
   async init() {
     const loaded = await this.store.load(emptyRelayDatabase());
     const migrated = migrateRelayDatabase(loaded);
-    if (!validDatabase(migrated)) {
+    if (!validRelayDatabase(migrated)) {
       throw new Error("Relay database failed validation after migration");
     }
     this.database = migrated;
@@ -356,11 +370,29 @@ export class RelayStore {
     return clone(this.database);
   }
 
+  stats() {
+    return {
+      accounts: this.database.accounts.length,
+      devices: this.database.devices.filter((entry) => entry.revokedAt === null)
+        .length,
+      activeRooms: this.database.rooms.filter(
+        (entry) => entry.status === "active",
+      ).length,
+      activeInvites: this.database.invites.filter((entry) =>
+        active(entry, this.now()),
+      ).length,
+      activeMemberships: this.database.memberships.filter(
+        (entry) => entry.revokedAt === null,
+      ).length,
+      roomStates: this.database.roomStates.length,
+    };
+  }
+
   transact(mutator) {
     const operation = this.tail.then(async () => {
       const draft = clone(this.database);
       const result = await mutator(draft);
-      if (!validDatabase(draft)) {
+      if (!validRelayDatabase(draft)) {
         throw new Error("Relay transaction produced invalid state");
       }
       await this.store.write(draft);
@@ -411,6 +443,12 @@ export class RelayStore {
     const passwordHash =
       password === null ? null : passwordDigest(password, passwordSalt);
     return this.transact((draft) => {
+      enforceCapacity(
+        draft.accounts.length,
+        this.capacity.accounts,
+        "Account capacity reached",
+        "ACCOUNT_CAPACITY",
+      );
       if (draft.accounts.some((account) => account.email === normalized)) {
         throw error("Account already exists", "ACCOUNT_EXISTS", 409);
       }
@@ -479,6 +517,15 @@ export class RelayStore {
       if (!draft.accounts.some((account) => account.id === accountId)) {
         throw error("Account not found", "ACCOUNT_NOT_FOUND", 404);
       }
+      enforceCapacity(
+        draft.devices.filter(
+          (device) =>
+            device.accountId === accountId && device.revokedAt === null,
+        ).length,
+        this.capacity.devicesPerAccount,
+        "Device capacity reached for this account",
+        "DEVICE_CAPACITY",
+      );
       const device = {
         id: this.randomId("dev"),
         accountId,
@@ -538,6 +585,17 @@ export class RelayStore {
       ) {
         throw error("Account not found", "ACCOUNT_NOT_FOUND", 404);
       }
+      enforceCapacity(
+        draft.pairings.filter(
+          (entry) =>
+            entry.accountId === accountId &&
+            entry.redeemedAt === null &&
+            entry.expiresAt > this.now(),
+        ).length,
+        this.capacity.pendingPairingsPerAccount,
+        "Pending pairing capacity reached for this account",
+        "PAIRING_CAPACITY",
+      );
       const pairing = {
         id: this.randomId("pair"),
         accountId,
@@ -580,6 +638,15 @@ export class RelayStore {
       if (!account) {
         throw error("Account not found", "ACCOUNT_NOT_FOUND", 404);
       }
+      enforceCapacity(
+        draft.devices.filter(
+          (device) =>
+            device.accountId === account.id && device.revokedAt === null,
+        ).length,
+        this.capacity.devicesPerAccount,
+        "Device capacity reached for this account",
+        "DEVICE_CAPACITY",
+      );
       pairing.redeemedAt = now;
       const device = {
         id: this.randomId("dev"),
@@ -610,6 +677,15 @@ export class RelayStore {
       if (!device || device.accountId !== accountId) {
         throw error("Device cannot create this room", "DEVICE_NOT_AUTHORIZED", 403);
       }
+      enforceCapacity(
+        draft.rooms.filter(
+          (room) =>
+            room.accountId === accountId && room.status === "active",
+        ).length,
+        this.capacity.activeRoomsPerAccount,
+        "Active room capacity reached for this account",
+        "ROOM_CAPACITY",
+      );
       const room = {
         id: this.randomId("room"),
         accountId,
@@ -695,6 +771,15 @@ export class RelayStore {
       if (!room || room.status !== "active") {
         throw error("Room not found", "ROOM_NOT_FOUND", 404);
       }
+      enforceCapacity(
+        draft.invites.filter(
+          (invite) =>
+            invite.roomId === roomId && active(invite, this.now()),
+        ).length,
+        this.capacity.activeInvitesPerRoom,
+        "Active invite capacity reached for this room",
+        "INVITE_CAPACITY",
+      );
       const invite = {
         id: this.randomId("invite"),
         roomId,
@@ -780,6 +865,16 @@ export class RelayStore {
       if (!room || room.status !== "active" || !room.joinsOpen) {
         throw error("Room is not accepting players", "ROOM_CLOSED", 403);
       }
+      enforceCapacity(
+        draft.memberships.filter(
+          (membership) =>
+            membership.roomId === room.id &&
+            membership.revokedAt === null,
+        ).length,
+        this.capacity.activeMembershipsPerRoom,
+        "Player capacity reached for this room",
+        "MEMBERSHIP_CAPACITY",
+      );
       const membership = {
         id: this.randomId("member"),
         roomId: room.id,

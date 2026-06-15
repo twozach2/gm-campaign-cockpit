@@ -290,3 +290,56 @@ test("asset pruning removes expired bytes and room cleanup removes active assets
   assert.equal((await assetStore.deleteRoomAssets("room_test")).length, 1);
   assert.equal(assetStore.asset(second.assetId), null);
 });
+
+test("asset store bounds active assets and pending grants by scope", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "gm-asset-capacity-"));
+  let sequence = 0;
+  const assetStore = new RelayAssetStore({
+    root,
+    capacity: {
+      assetsPerRoom: 1,
+      pendingGrantsPerDevice: 1,
+    },
+    randomId: (prefix) => `${prefix}_capacity_${++sequence}`,
+    randomSecret: () => `upload-secret-${++sequence}-with-sufficient-length`,
+  });
+  await assetStore.init();
+  t.after(async () => {
+    await assetStore.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const pending = await assetStore.createGrant({
+    roomId: "room_capacity",
+    deviceId: "dev_capacity",
+    contentType: "image/png",
+    byteLength: PNG.length,
+    sha256: sha256(PNG),
+  });
+  await assert.rejects(
+    assetStore.createGrant({
+      roomId: "room_other",
+      deviceId: "dev_capacity",
+      contentType: "image/png",
+      byteLength: PNG.length,
+      sha256: sha256(PNG),
+    }),
+    (error) => error.code === "ASSET_GRANT_CAPACITY",
+  );
+  await assetStore.completeUpload({
+    assetId: pending.assetId,
+    uploadToken: pending.uploadToken,
+    contentType: "image/png",
+    content: PNG,
+  });
+  await assert.rejects(
+    assetStore.createGrant({
+      roomId: "room_capacity",
+      deviceId: "dev_capacity",
+      contentType: "image/png",
+      byteLength: PNG.length,
+      sha256: sha256(PNG),
+    }),
+    (error) => error.code === "ROOM_ASSET_CAPACITY",
+  );
+});

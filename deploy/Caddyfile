@@ -1,0 +1,12 @@
+{$RELAY_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy relay:8787 {
+    header_up X-Forwarded-For {remote_host}
+    header_up X-Forwarded-Proto {scheme}
+  }
+  header {
+    Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    -Server
+  }
+  log
+}

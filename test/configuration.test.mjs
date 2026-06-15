@@ -94,6 +94,13 @@ test("portable configuration files contain no personal machine paths", async () 
     packageData.scripts["relay:bootstrap"],
     "node relay/bootstrap.mjs",
   );
+  assert.equal(packageData.scripts["relay:backup"], "node relay/backup.mjs");
+  assert.equal(packageData.scripts["relay:restore"], "node relay/restore.mjs");
+  assert.equal(
+    packageData.scripts["relay:rehearse"],
+    "node relay/rehearse.mjs",
+  );
+  assert.equal(packageData.scripts["relay:soak"], "node relay/soak.mjs");
 });
 
 test("documentation describes the supported security and recovery boundary", async () => {
@@ -132,20 +139,62 @@ test("documentation describes the supported security and recovery boundary", asy
     "RELAY_MAX_ASSET_BYTES",
     "RELAY_ASSET_RETENTION_MS",
     "RELAY_ASSET_GRANT_TTL_MS",
+    "RELAY_MAX_LIMITER_KEYS",
+    "RELAY_MAX_ACCOUNTS",
+    "RELAY_MAX_DEVICES_PER_ACCOUNT",
+    "RELAY_MAX_ACTIVE_ROOMS_PER_ACCOUNT",
+    "RELAY_MAX_ACTIVE_INVITES_PER_ROOM",
+    "RELAY_MAX_PLAYERS_PER_ROOM",
+    "RELAY_MAX_PENDING_PAIRINGS_PER_ACCOUNT",
+    "RELAY_MAX_ASSETS_PER_ROOM",
+    "RELAY_MAX_PENDING_ASSET_GRANTS_PER_DEVICE",
+    "RELAY_METRICS_TOKEN",
+    "RELAY_BACKUP_DIR",
+    "RELAY_TRUST_PROXY",
     "RELAY_PUBLIC_ORIGIN",
     "RELAY_TLS_CERT_FILE",
     "RELAY_TLS_KEY_FILE",
     "RELAY_BOOTSTRAP_PASSPHRASE",
+    "RELAY_RESTORE_CONFIRM",
+    "RELAY_SOAK_URL",
+    "RELAY_SOAK_DURATION_SECONDS",
+    "RELAY_SOAK_CONCURRENCY",
+    "RELAY_SOAK_REGION",
   ]) {
     assert.match(example, new RegExp(`\\b${variable}\\b`));
   }
   assert.doesNotMatch(readme, /prints? (?:the )?(?:table )?pin/i);
-  assert.match(readme, /outbound `wss:\/\/` connection/i);
-  assert.match(readme, /no production hosted relay bundled/i);
+  assert.match(readme, /outbound\s+`wss:\/\/` connection/i);
+  assert.match(readme, /no broad-public hosted service bundled/i);
   assert.match(readme, /npm run relay:start/i);
   assert.match(readme, /npm run relay:bootstrap/i);
   assert.match(readme, /room-scoped asset ID/i);
   assert.match(readme, /membership bearer session/i);
+  assert.match(readme, /npm run relay:backup/i);
+  assert.match(readme, /npm run relay:restore/i);
+  assert.match(readme, /npm run relay:soak/i);
+  assert.match(readme, /relay\/OPERATIONS\.md/i);
+});
+
+test("relay deployment keeps the app private behind managed TLS", async () => {
+  const dockerfile = await readFile(localPath("Dockerfile"), "utf8");
+  const compose = await readFile(localPath("deploy/compose.yaml"), "utf8");
+  const caddy = await readFile(localPath("deploy/Caddyfile"), "utf8");
+  const operations = await readFile(localPath("relay/OPERATIONS.md"), "utf8");
+  const relayService = compose.split(/\n  caddy:/)[0];
+
+  assert.match(dockerfile, /\bUSER node\b/);
+  assert.match(dockerfile, /\bHEALTHCHECK\b/);
+  assert.match(dockerfile, /RELAY_STATE_FILE=\/data\/relay\.json/);
+  assert.doesNotMatch(relayService, /\n\s+ports:/);
+  assert.match(compose, /"443:443"/);
+  assert.match(compose, /read_only: true/);
+  assert.match(compose, /cap_drop:\s*\n\s+- ALL/);
+  assert.match(caddy, /reverse_proxy relay:8787/);
+  assert.match(caddy, /Strict-Transport-Security/);
+  assert.match(operations, /stop the relay\s+before backup or restore/i);
+  assert.match(operations, /at least two regions/i);
+  assert.match(operations, /relay_audit/);
 });
 
 test("relay configuration fails closed unless it is complete and secure", async () => {

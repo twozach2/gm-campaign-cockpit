@@ -22,6 +22,10 @@ const DEFAULT_MAX_BYTES = 25 * 1024 * 1024;
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_GRANT_TTL_MS = 5 * 60 * 1_000;
 const MAX_RECORDS = 10_000;
+const DEFAULT_CAPACITY = Object.freeze({
+  assetsPerRoom: 100,
+  pendingGrantsPerDevice: 20,
+});
 
 function emptyManifest() {
   return {
@@ -70,7 +74,7 @@ function validTimestamp(value) {
   return Number.isSafeInteger(value) && value >= 0;
 }
 
-function validManifest(value) {
+export function validAssetManifest(value) {
   if (
     !value ||
     typeof value !== "object" ||
@@ -126,6 +130,7 @@ export class RelayAssetStore {
     randomId = identifier,
     randomSecret = secret,
     logger,
+    capacity = {},
   }) {
     if (!root) throw new Error("Relay asset storage requires a root directory");
     this.root = path.resolve(root);
@@ -137,11 +142,12 @@ export class RelayAssetStore {
     this.randomId = randomId;
     this.randomSecret = randomSecret;
     this.logger = logger;
+    this.capacity = { ...DEFAULT_CAPACITY, ...capacity };
     this.manifest = emptyManifest();
     this.tail = Promise.resolve();
     this.store = new AtomicJsonStore({
       file: path.join(this.root, "assets.json"),
-      validate: validManifest,
+      validate: validAssetManifest,
       onWarning: (_message, details = {}) => {
         this.logger?.warn("relay_asset_recovery", {
           action: details.code || "RECOVERY_WARNING",
@@ -157,11 +163,25 @@ export class RelayAssetStore {
     return this;
   }
 
+  stats() {
+    return {
+      hostedAssets: this.manifest.assets.filter(
+        (entry) => entry.expiresAt > this.now(),
+      ).length,
+      pendingAssetGrants: this.manifest.grants.filter(
+        (entry) => entry.expiresAt > this.now(),
+      ).length,
+      hostedAssetBytes: this.manifest.assets
+        .filter((entry) => entry.expiresAt > this.now())
+        .reduce((total, entry) => total + entry.byteLength, 0),
+    };
+  }
+
   transact(mutator) {
     const operation = this.tail.then(async () => {
       const draft = clone(this.manifest);
       const result = await mutator(draft);
-      if (!validManifest(draft)) {
+      if (!validAssetManifest(draft)) {
         throw new Error("Relay asset transaction produced invalid state");
       }
       await this.store.write(draft);
@@ -216,6 +236,30 @@ export class RelayAssetStore {
           "Asset upload grant capacity reached",
           "ASSET_GRANT_CAPACITY",
           429,
+        );
+      }
+      if (
+        draft.assets.filter(
+          (entry) =>
+            entry.roomId === roomId && entry.expiresAt > this.now(),
+        ).length >= this.capacity.assetsPerRoom
+      ) {
+        throw assetError(
+          "Hosted asset capacity reached for this room",
+          "ROOM_ASSET_CAPACITY",
+          409,
+        );
+      }
+      if (
+        draft.grants.filter(
+          (entry) =>
+            entry.deviceId === deviceId && entry.expiresAt > this.now(),
+        ).length >= this.capacity.pendingGrantsPerDevice
+      ) {
+        throw assetError(
+          "Pending asset grant capacity reached for this device",
+          "ASSET_GRANT_CAPACITY",
+          409,
         );
       }
       draft.grants.push(grant);
@@ -302,7 +346,7 @@ export class RelayAssetStore {
         };
         draft.grants.splice(grantIndex, 1);
         draft.assets.push(asset);
-        if (!validManifest(draft)) {
+        if (!validAssetManifest(draft)) {
           throw new Error("Relay asset upload produced invalid state");
         }
         await this.store.write(draft);

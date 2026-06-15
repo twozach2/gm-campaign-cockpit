@@ -24,7 +24,7 @@ function deterministicValues() {
   };
 }
 
-async function createStore(t, { legacy } = {}) {
+async function createStore(t, { legacy, capacity } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "gm-relay-store-"));
   const file = path.join(root, "relay-state.json");
   if (legacy) await writeFile(file, JSON.stringify(legacy), "utf8");
@@ -32,6 +32,7 @@ async function createStore(t, { legacy } = {}) {
   const store = new RelayStore({
     file,
     now: () => 1_000,
+    capacity,
     ...values,
   });
   await store.init();
@@ -41,6 +42,57 @@ async function createStore(t, { legacy } = {}) {
   });
   return { file, store };
 }
+
+test("relay store enforces account, device, room, invite, pairing, and player capacity", async (t) => {
+  const { store } = await createStore(t, {
+    capacity: {
+      accounts: 1,
+      devicesPerAccount: 1,
+      activeRoomsPerAccount: 1,
+      activeInvitesPerRoom: 1,
+      activeMembershipsPerRoom: 1,
+      pendingPairingsPerAccount: 1,
+    },
+  });
+  const created = await bootstrap(store);
+
+  await assert.rejects(
+    store.createAccount({ email: "second@example.test" }),
+    (error) => error.code === "ACCOUNT_CAPACITY",
+  );
+  await assert.rejects(
+    store.createDevice({ accountId: created.account.id, name: "Second device" }),
+    (error) => error.code === "DEVICE_CAPACITY",
+  );
+  await assert.rejects(
+    store.createRoom({
+      accountId: created.account.id,
+      agentDeviceId: created.device.device.id,
+      name: "Second room",
+    }),
+    (error) => error.code === "ROOM_CAPACITY",
+  );
+  await assert.rejects(
+    store.createInvite({ roomId: created.room.id }),
+    (error) => error.code === "INVITE_CAPACITY",
+  );
+  await store.createPairing({ accountId: created.account.id });
+  await assert.rejects(
+    store.createPairing({ accountId: created.account.id }),
+    (error) => error.code === "PAIRING_CAPACITY",
+  );
+  await store.redeemInvite({
+    token: created.invite.token,
+    displayName: "Aria",
+  });
+  await assert.rejects(
+    store.redeemInvite({
+      token: created.invite.token,
+      displayName: "Bram",
+    }),
+    (error) => error.code === "MEMBERSHIP_CAPACITY",
+  );
+});
 
 async function bootstrap(store, email = "dm@example.test") {
   return store.bootstrap({

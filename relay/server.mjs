@@ -44,6 +44,48 @@ const assetGrantTtlMs = positiveInteger(
   "RELAY_ASSET_GRANT_TTL_MS",
   5 * 60 * 1_000,
 );
+const maxLimiterKeys = positiveInteger("RELAY_MAX_LIMITER_KEYS", 10_000);
+const storeCapacity = {
+  accounts: positiveInteger("RELAY_MAX_ACCOUNTS", 1_000),
+  devicesPerAccount: positiveInteger(
+    "RELAY_MAX_DEVICES_PER_ACCOUNT",
+    20,
+  ),
+  activeRoomsPerAccount: positiveInteger(
+    "RELAY_MAX_ACTIVE_ROOMS_PER_ACCOUNT",
+    20,
+  ),
+  activeInvitesPerRoom: positiveInteger(
+    "RELAY_MAX_ACTIVE_INVITES_PER_ROOM",
+    5,
+  ),
+  activeMembershipsPerRoom: positiveInteger(
+    "RELAY_MAX_PLAYERS_PER_ROOM",
+    200,
+  ),
+  pendingPairingsPerAccount: positiveInteger(
+    "RELAY_MAX_PENDING_PAIRINGS_PER_ACCOUNT",
+    10,
+  ),
+};
+const assetCapacity = {
+  assetsPerRoom: positiveInteger("RELAY_MAX_ASSETS_PER_ROOM", 100),
+  pendingGrantsPerDevice: positiveInteger(
+    "RELAY_MAX_PENDING_ASSET_GRANTS_PER_DEVICE",
+    20,
+  ),
+};
+const trustProxy = process.env.RELAY_TRUST_PROXY === "true";
+if (
+  process.env.RELAY_TRUST_PROXY !== undefined &&
+  !["true", "false"].includes(process.env.RELAY_TRUST_PROXY)
+) {
+  throw new Error("RELAY_TRUST_PROXY must be true or false");
+}
+const metricsToken = String(process.env.RELAY_METRICS_TOKEN || "").trim();
+if (metricsToken && metricsToken.length < 24) {
+  throw new Error("RELAY_METRICS_TOKEN must contain at least 24 characters");
+}
 const certFile = process.env.RELAY_TLS_CERT_FILE;
 const keyFile = process.env.RELAY_TLS_KEY_FILE;
 if (Boolean(certFile) !== Boolean(keyFile)) {
@@ -59,12 +101,17 @@ const tls =
       }
     : null;
 const logger = createLogger();
-const store = new RelayStore({ file: stateFile, logger });
+const store = new RelayStore({
+  file: stateFile,
+  logger,
+  capacity: storeCapacity,
+});
 const assetStore = new RelayAssetStore({
   root: assetRoot,
   maxBytes: maxAssetBytes,
   retentionMs: assetRetentionMs,
   grantTtlMs: assetGrantTtlMs,
+  capacity: assetCapacity,
   logger,
 });
 const publicOrigin = process.env.RELAY_PUBLIC_ORIGIN || undefined;
@@ -87,6 +134,9 @@ const service = new HostedRelayService({
   store,
   assetStore,
   maxAssetBytes,
+  maxLimiterKeys,
+  trustProxy,
+  metricsToken,
   host,
   port,
   tls,

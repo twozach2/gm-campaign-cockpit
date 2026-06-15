@@ -32,7 +32,7 @@ async function waitFor(check, timeoutMs = 1_000) {
   throw new Error("Timed out waiting for hosted relay state");
 }
 
-async function startRelay(t) {
+async function startRelay(t, serviceOptions = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "gm-hosted-relay-"));
   const store = new RelayStore({
     file: path.join(root, "relay.json"),
@@ -44,6 +44,7 @@ async function startRelay(t) {
     port: 0,
     heartbeatMs: 60_000,
     logger: silentLogger,
+    ...serviceOptions,
   });
   const address = await service.start();
   const sockets = [];
@@ -63,6 +64,103 @@ async function startRelay(t) {
     },
   };
 }
+
+test("hosted relay rate limits public credentials and protects metrics", async (t) => {
+  const metricsToken = "private-monitoring-token-with-length";
+  const auditEvents = [];
+  const relay = await startRelay(t, {
+    metricsToken,
+    logger: {
+      info(event, details) {
+        if (event === "relay_audit") auditEvents.push(details);
+      },
+      warn() {},
+      error() {},
+    },
+    rateLimits: {
+      loginPerIp: { capacity: 1, windowMs: 60_000 },
+      invitePerIp: { capacity: 1, windowMs: 60_000 },
+      invitePerToken: { capacity: 1, windowMs: 60_000 },
+    },
+  });
+  const created = await relay.store.bootstrap({
+    email: "limited@example.test",
+    passphrase: "a long account passphrase",
+    deviceName: "Campaign laptop",
+    roomName: "Limited table",
+  });
+
+  const firstLogin = await adminRequest(relay, "/v1/admin/login", {
+    method: "POST",
+    body: {
+      email: "limited@example.test",
+      passphrase: "a long account passphrase",
+    },
+  });
+  assert.equal(firstLogin.response.status, 200);
+  const secondLogin = await adminRequest(relay, "/v1/admin/login", {
+    method: "POST",
+    body: {
+      email: "limited@example.test",
+      passphrase: "a long account passphrase",
+    },
+  });
+  assert.equal(secondLogin.response.status, 429);
+  assert.equal(secondLogin.data.code, "RATE_LIMITED");
+  assert.ok(Number(secondLogin.response.headers.get("retry-after")) >= 1);
+  const thirdLogin = await adminRequest(relay, "/v1/admin/login", {
+    method: "POST",
+    body: {
+      email: "limited@example.test",
+      passphrase: "a long account passphrase",
+    },
+  });
+  assert.equal(thirdLogin.response.status, 429);
+
+  assert.equal(
+    (await redeem(relay.baseUrl, created.invite.token, "Aria")).room.id,
+    created.room.id,
+  );
+  const secondJoin = await fetch(`${relay.baseUrl}/v1/invites/redeem`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      inviteToken: created.invite.token,
+      displayName: "Bram",
+    }),
+  });
+  assert.equal(secondJoin.status, 429);
+
+  assert.equal((await fetch(`${relay.baseUrl}/metrics`)).status, 404);
+  const metrics = await fetch(`${relay.baseUrl}/metrics`, {
+    headers: { Authorization: `Bearer ${metricsToken}` },
+  });
+  assert.equal(metrics.status, 200);
+  const body = await metrics.json();
+  assert.ok(body.requests.rateLimited >= 2);
+  assert.equal(body.records.accounts, 1);
+  assert.equal(body.records.activeRooms, 1);
+  assert.ok(body.requests.auditEvents >= 3);
+  assert.doesNotMatch(JSON.stringify(body), /limited@example|tokenHash|passphrase/);
+  assert.ok(
+    auditEvents.some(
+      (event) =>
+        event.action === "admin.login" && event.result === "accepted",
+    ),
+  );
+  assert.ok(
+    auditEvents.some((event) => event.action === "rate_limit.exceeded"),
+  );
+  assert.equal(
+    auditEvents.filter(
+      (event) =>
+        event.action === "rate_limit.exceeded" &&
+        event.bucket === "login-ip",
+    ).length,
+    1,
+  );
+  assert.doesNotMatch(JSON.stringify(auditEvents), /passphrase|inviteToken/i);
+});
 
 async function bootstrap(store, email = "dm@example.test") {
   return store.bootstrap({

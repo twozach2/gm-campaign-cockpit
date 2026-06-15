@@ -20,6 +20,7 @@ data/*.corrupt
 data/*.bak
 data/*.tmp
 relay/data/
+relay/backups/
 
 # --- macOS ---
 .DS_Store

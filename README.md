@@ -21,8 +21,9 @@ Three operating modes are available:
 
 Local and trusted-LAN modes are ready for normal campaign use. The hosted relay
 implements accounts, device pairing, rooms, invites, and the remote player
-screen, including explicitly revealed raster images. It still requires a
-development deployment rather than direct public exposure.
+screen, including explicitly revealed raster images. It includes a managed-TLS
+deployment example and operational tooling for a controlled private pilot, but
+still requires the security review described below before broad public use.
 
 ## Requirements
 
@@ -266,13 +267,12 @@ relay over HTTPS/WSS.
 
 ## Hosted Relay
 
-The `relay/` service is a working Phase Two development implementation, not a
-production deployment. It keeps the local cockpit authoritative and accepts
-the cockpit's outbound `wss://` connection plus room-scoped player
-connections. It stores accounts, devices, rooms, invites, memberships, and
-bounded player-safe room projections in a versioned atomic JSON file. Account
-passphrases and device, invite, and membership secrets are stored only as
-password hashes or capability hashes.
+The `relay/` service is a working Phase Two private-pilot implementation. It
+keeps the local cockpit authoritative and accepts the cockpit's outbound
+`wss://` connection plus room-scoped player connections. It stores accounts,
+devices, rooms, invites, memberships, and bounded player-safe room projections
+in a versioned atomic JSON file. Account passphrases and device, invite, and
+membership secrets are stored only as password hashes or capability hashes.
 
 The connector publishes only player-safe room projections: explicit text,
 card, and image reveals; visible trackers; scoped chat; and public player
@@ -311,6 +311,8 @@ RELAY_PUBLIC_ORIGIN=https://relay.example.com
 ```
 
 The public origin controls same-origin checks and secure account cookies.
+The service also applies scoped IP, account, device, invite, room, player, and
+asset limits. See `.env.example` for the configurable capacity ceilings.
 
 ### 2. Create The First Account
 
@@ -390,6 +392,7 @@ corresponding remote access.
 Available service boundaries:
 
 - `GET /health` and `GET /readiness`
+- Protected `GET /metrics` with `RELAY_METRICS_TOKEN`
 - `POST /v1/invites/redeem`
 - `GET /v1/player/session`
 - Hosted player interface at `/player/`
@@ -401,11 +404,34 @@ Available service boundaries:
 - `WS /v1/agent/<room-id>`
 - `WS /v1/player/<room-id>`
 
-There is no production hosted relay bundled with this repository yet. Before
-general public use, the development service still needs a production database
-and backup policy, stronger deployment limits, monitoring, account recovery
-and administration, abuse controls, and a dedicated security review. Treat the
-current relay as a controlled development or private test deployment.
+### Operations And Deployment
+
+The repository includes a non-root relay image, a private-network
+`deploy/compose.yaml`, and Caddy-managed HTTPS/WSS termination. Only Caddy
+publishes internet ports; the relay has no host port in the sample deployment.
+The complete release checklist, alerts, backup schedule, restore procedure,
+and incident actions are in `relay/OPERATIONS.md`.
+
+Stop the relay before backup or restore so the database and asset directory
+form one consistent snapshot:
+
+```bash
+npm run relay:backup
+npm run relay:rehearse
+RELAY_RESTORE_CONFIRM=RESTORE npm run relay:restore -- /path/to/relay-backup
+```
+
+Backups use a checksummed inventory and preserve pre-restore rollback copies.
+For staging availability and regional latency checks:
+
+```bash
+RELAY_SOAK_URL=https://relay.example.com npm run relay:soak
+```
+
+There is no broad-public hosted service bundled with this repository. The
+remaining gate is Phase Two security review and an invite-only pilot,
+including dependency/container scanning, an external authorization review,
+account-recovery administration, and published privacy and retention terms.
 
 ## Validation
 

@@ -1,0 +1,41 @@
+services:
+  relay:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      RELAY_PUBLIC_ORIGIN: https://${RELAY_DOMAIN}
+      RELAY_TRUST_PROXY: "true"
+      RELAY_METRICS_TOKEN: ${RELAY_METRICS_TOKEN}
+    volumes:
+      - relay-data:/data
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    depends_on:
+      relay:
+        condition: service_healthy
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  relay-data:
+  caddy-data:
+  caddy-config:

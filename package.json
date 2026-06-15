@@ -12,6 +12,10 @@
     "test": "node --test",
     "new-campaign": "node scaffold.mjs",
     "relay:start": "node relay/server.mjs",
-    "relay:bootstrap": "node relay/bootstrap.mjs"
+    "relay:bootstrap": "node relay/bootstrap.mjs",
+    "relay:backup": "node relay/backup.mjs",
+    "relay:restore": "node relay/restore.mjs",
+    "relay:rehearse": "node relay/rehearse.mjs",
+    "relay:soak": "node relay/soak.mjs"
   }
 }
