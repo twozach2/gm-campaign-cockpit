@@ -22,7 +22,7 @@ function sha256(content) {
   return createHash("sha256").update(content).digest("base64url");
 }
 
-async function startRelay(t) {
+async function startRelay(t, serviceOptions = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "gm-relay-assets-"));
   const store = new RelayStore({
     file: path.join(root, "relay.json"),
@@ -39,6 +39,7 @@ async function startRelay(t) {
     port: 0,
     heartbeatMs: 60_000,
     logger: silentLogger,
+    ...serviceOptions,
   });
   const address = await service.start();
   t.after(async () => {
@@ -206,6 +207,18 @@ test("hosted assets use one-time grants and membership-authorized downloads", as
   });
   assert.equal(ended.status, 200);
   assert.equal(relay.assetStore.asset(secondGrant.data.assetId), null);
+});
+
+test("asset grants enforce a per-account byte quota across rooms", async (t) => {
+  const relay = await startRelay(t, { maxAccountAssetBytes: PNG.length });
+  const first = await bootstrap(relay.store, "first@example.test");
+
+  const granted = await createGrant(relay, first);
+  assert.equal(granted.response.status, 201);
+
+  const overQuota = await createGrant(relay, first);
+  assert.equal(overQuota.response.status, 409);
+  assert.equal(overQuota.data.code, "ACCOUNT_ASSET_QUOTA");
 });
 
 test("hosted assets reject spoofed bytes and cross-room device grants", async (t) => {

@@ -330,6 +330,18 @@ The command creates the account plus an initial device, room, and invite. It
 prints the device token, room ID, and invite token once. Keep those
 capabilities private.
 
+There is also no self-service passphrase reset. When a DM forgets their
+passphrase, an operator resets it from the relay host:
+
+```powershell
+$env:RELAY_RESET_PASSPHRASE = "choose-a-long-account-passphrase"
+npm run relay:reset-passphrase -- "dm@example.com"
+```
+
+The reset rewrites only the salted passphrase hash; existing device, room, and
+player capabilities continue to work. See `relay/OPERATIONS.md` for the incident
+procedure.
+
 Open the relay root URL in a browser and sign in with the email and passphrase.
 The account dashboard can generate one-time device pairing codes, list and
 revoke devices, create and end rooms, open or close joins, rotate invites, and

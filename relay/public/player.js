@@ -68,6 +68,61 @@ const elements = {
   toast: document.querySelector("#player-toast"),
 };
 
+function createFocusTrap(container) {
+  if (!container) return { activate() {}, deactivate() {} };
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let restoreTo = null;
+  const focusable = () =>
+    Array.from(container.querySelectorAll(FOCUSABLE)).filter(
+      (el) => el.offsetParent !== null,
+    );
+  function onKeydown(event) {
+    if (event.key !== "Tab") return;
+    const items = focusable();
+    if (!items.length) {
+      event.preventDefault();
+      container.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+  return {
+    activate(initialFocus) {
+      restoreTo = document.activeElement;
+      container.addEventListener("keydown", onKeydown);
+      (initialFocus || focusable()[0] || container).focus();
+    },
+    deactivate() {
+      container.removeEventListener("keydown", onKeydown);
+      if (restoreTo && typeof restoreTo.focus === "function") restoreTo.focus();
+      restoreTo = null;
+    },
+  };
+}
+
+const lightboxTrap = createFocusTrap(elements.lightbox);
+const joinTrap = createFocusTrap(elements.joinOverlay);
+const renameTrap = createFocusTrap(elements.renameOverlay);
+
+function showJoinOverlay() {
+  elements.joinOverlay.classList.remove("hidden");
+  joinTrap.activate(elements.inviteToken);
+}
+
+function hideJoinOverlay() {
+  joinTrap.deactivate();
+  elements.joinOverlay.classList.add("hidden");
+}
+
 function loadStoredSession() {
   try {
     const value = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
@@ -445,7 +500,7 @@ function connect() {
     if (event.code === 4003 || event.code === 4004) {
       clearStoredSession();
       setConnection("disconnected");
-      elements.joinOverlay.classList.remove("hidden");
+      showJoinOverlay();
       showToast(event.code === 4004 ? "This room has ended" : "Your room access was removed");
       return;
     }
@@ -478,7 +533,7 @@ async function join(inviteToken, displayName) {
   applyMembership(data.membership);
   saveSession();
   await restoreSession();
-  elements.joinOverlay.classList.add("hidden");
+  hideJoinOverlay();
   connect();
 }
 
@@ -490,7 +545,7 @@ function leaveSession() {
   rejectPending("Player left");
   clearStoredSession();
   setConnection("disconnected");
-  elements.joinOverlay.classList.remove("hidden");
+  showJoinOverlay();
 }
 
 elements.nav.addEventListener("click", (event) => {
@@ -539,12 +594,16 @@ elements.whisperToggle.addEventListener("click", () => {
 elements.rename.addEventListener("click", () => {
   elements.renameName.value = state.membership?.displayName || "";
   elements.renameOverlay.classList.remove("hidden");
-  elements.renameName.focus();
+  renameTrap.activate(elements.renameName);
 });
 
-elements.renameCancel.addEventListener("click", () => {
+function closeRenameOverlay() {
+  if (elements.renameOverlay.classList.contains("hidden")) return;
   elements.renameOverlay.classList.add("hidden");
-});
+  renameTrap.deactivate();
+}
+
+elements.renameCancel.addEventListener("click", closeRenameOverlay);
 
 elements.renameForm.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -556,7 +615,7 @@ elements.renameForm.addEventListener("submit", async (event) => {
   try {
     await sendCommand("player.rename", { displayName });
     applyMembership({ ...state.membership, displayName });
-    elements.renameOverlay.classList.add("hidden");
+    closeRenameOverlay();
   } catch (error) {
     showToast(error.message);
   }
@@ -580,28 +639,43 @@ elements.feed.addEventListener("click", (event) => {
   if (!image) return;
   elements.lightboxImg.src = image.src;
   elements.lightbox.classList.remove("hidden");
+  lightboxTrap.activate();
 });
 
-elements.lightbox.addEventListener("click", () => {
+function closeLightbox() {
+  if (elements.lightbox.classList.contains("hidden")) return;
   elements.lightbox.classList.add("hidden");
   elements.lightboxImg.src = "";
+  lightboxTrap.deactivate();
+}
+
+elements.lightbox.addEventListener("click", closeLightbox);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!elements.lightbox.classList.contains("hidden")) {
+    closeLightbox();
+  } else {
+    closeRenameOverlay();
+  }
 });
 
 async function start() {
   loadStoredSession();
   if (!state.token || !state.roomId) {
     setConnection("disconnected");
+    showJoinOverlay();
     return;
   }
   try {
     state.manualClose = false;
     await restoreSession();
-    elements.joinOverlay.classList.add("hidden");
+    hideJoinOverlay();
     connect();
   } catch (error) {
     clearStoredSession();
     setConnection("disconnected");
-    elements.joinOverlay.classList.remove("hidden");
+    showJoinOverlay();
     if (error.status !== 401 && error.status !== 404) showToast(error.message);
   }
 }

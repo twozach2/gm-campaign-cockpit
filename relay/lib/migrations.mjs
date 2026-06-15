@@ -1,4 +1,4 @@
-export const RELAY_SCHEMA_VERSION = 2;
+export const RELAY_SCHEMA_VERSION = 3;
 
 export function emptyRelayDatabase() {
   return {
@@ -61,6 +61,17 @@ export function migrateRelayDatabase(value) {
         passwordHash: null,
       })),
       pairings: [],
+    };
+  }
+  if (migrated.schemaVersion === 2) {
+    migrated = {
+      ...migrated,
+      schemaVersion: 3,
+      accounts: recordArray(migrated, "accounts").map((account) => ({
+        ...account,
+        failedLoginCount: 0,
+        lockedUntil: null,
+      })),
     };
   }
   return migrated;

@@ -36,6 +36,10 @@ const maxAssetBytes = positiveInteger(
   "RELAY_MAX_ASSET_BYTES",
   25 * 1024 * 1024,
 );
+const maxAccountAssetBytes = positiveInteger(
+  "RELAY_MAX_ASSET_BYTES_PER_ACCOUNT",
+  250 * 1024 * 1024,
+);
 const assetRetentionMs = positiveInteger(
   "RELAY_ASSET_RETENTION_MS",
   7 * 24 * 60 * 60 * 1_000,
@@ -75,6 +79,11 @@ const assetCapacity = {
     20,
   ),
 };
+const lockout = {
+  threshold: positiveInteger("RELAY_LOGIN_FAILURE_THRESHOLD", 10),
+  baseMs: positiveInteger("RELAY_LOGIN_LOCK_BASE_MS", 15 * 60 * 1_000),
+  maxMs: positiveInteger("RELAY_LOGIN_LOCK_MAX_MS", 24 * 60 * 60 * 1_000),
+};
 const trustProxy = process.env.RELAY_TRUST_PROXY === "true";
 if (
   process.env.RELAY_TRUST_PROXY !== undefined &&
@@ -105,6 +114,7 @@ const store = new RelayStore({
   file: stateFile,
   logger,
   capacity: storeCapacity,
+  lockout,
 });
 const assetStore = new RelayAssetStore({
   root: assetRoot,
@@ -134,6 +144,7 @@ const service = new HostedRelayService({
   store,
   assetStore,
   maxAssetBytes,
+  maxAccountAssetBytes,
   maxLimiterKeys,
   trustProxy,
   metricsToken,

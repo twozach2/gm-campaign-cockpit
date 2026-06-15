@@ -177,6 +177,24 @@ export class RelayAssetStore {
     };
   }
 
+  reservedBytesForRooms(roomIds) {
+    const rooms = new Set(roomIds);
+    if (rooms.size === 0) return 0;
+    const now = this.now();
+    let total = 0;
+    for (const asset of this.manifest.assets) {
+      if (rooms.has(asset.roomId) && asset.expiresAt > now) {
+        total += asset.byteLength;
+      }
+    }
+    for (const grant of this.manifest.grants) {
+      if (rooms.has(grant.roomId) && grant.expiresAt > now) {
+        total += grant.byteLength;
+      }
+    }
+    return total;
+  }
+
   transact(mutator) {
     const operation = this.tail.then(async () => {
       const draft = clone(this.manifest);

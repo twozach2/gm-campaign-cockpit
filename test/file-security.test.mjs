@@ -3,6 +3,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  realpath,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -60,7 +61,7 @@ test("vault blocks slash, backslash, and symlink path escapes", async (t) => {
 
   assert.equal(
     await vault.resolveFilePath(CAMPAIGN, "portrait.png"),
-    path.join(campaignFolder, "portrait.png"),
+    await realpath(path.join(campaignFolder, "portrait.png")),
   );
   await assert.rejects(
     () => vault.resolveFilePath(CAMPAIGN, "../outside.txt"),

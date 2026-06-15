@@ -33,6 +33,7 @@ const MAX_CONNECTIONS = 1_000;
 const MAX_PENDING_COMMANDS = 2_000;
 const COMMAND_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_ASSET_BYTES = 25 * 1024 * 1024;
+const DEFAULT_MAX_ACCOUNT_ASSET_BYTES = 250 * 1024 * 1024;
 const ASSET_PRUNE_INTERVAL_MS = 60_000;
 const DEFAULT_LIMITS = Object.freeze({
   httpPerIp: { capacity: 300, windowMs: 60_000 },
@@ -281,6 +282,7 @@ export class HostedRelayService {
     accountAuth,
     assetStore,
     maxAssetBytes = DEFAULT_MAX_ASSET_BYTES,
+    maxAccountAssetBytes = DEFAULT_MAX_ACCOUNT_ASSET_BYTES,
     rateLimiter,
     rateLimits = {},
     maxLimiterKeys = 10_000,
@@ -307,6 +309,8 @@ export class HostedRelayService {
       new RelayAccountAuth({
         store,
         now,
+        logger,
+        file: path.join(path.dirname(store.store.file), "sessions.json"),
       });
     this.assetStore =
       assetStore ||
@@ -317,6 +321,7 @@ export class HostedRelayService {
         now,
       });
     this.maxAssetBytes = maxAssetBytes;
+    this.maxAccountAssetBytes = maxAccountAssetBytes;
     this.rateLimiter =
       rateLimiter ||
       new TokenBucketRateLimiter({
@@ -351,6 +356,7 @@ export class HostedRelayService {
   async start() {
     await this.store.init();
     await this.assetStore.init();
+    await this.accountAuth.init?.();
     this.server = this.tls
       ? createHttpsServer(this.tls, (request, response) =>
           this.handleHttp(request, response),
@@ -422,6 +428,7 @@ export class HostedRelayService {
     }
     await this.assetStore.close();
     await this.store.close();
+    await this.accountAuth.close?.();
     this.logger.info("hosted_relay_stopped", {});
   }
 
@@ -478,19 +485,34 @@ export class HostedRelayService {
           ["email", "passphrase"],
           "Account login",
         );
+        const email = requiredString(body.email, "Email", 320);
+        const passphrase = requiredString(body.passphrase, "Passphrase", 512);
         this.consumeLimit(
           "login-account",
-          hashKey(String(body.email || "").trim().toLowerCase()),
+          hashKey(email.toLowerCase()),
           this.rateLimits.loginPerAccount,
         );
-        const authenticated = this.accountAuth.login(
-          requiredString(body.email, "Email", 320),
-          requiredString(body.passphrase, "Passphrase", 512),
-        );
+        const lock = this.store.accountLockState(email);
+        if (lock.locked) {
+          this.audit("admin.login", { result: "locked" });
+          return json(
+            response,
+            423,
+            { error: "Account is temporarily locked. Try again later." },
+            {
+              "Retry-After": String(
+                Math.max(1, Math.ceil(lock.retryAfterMs / 1_000)),
+              ),
+            },
+          );
+        }
+        const authenticated = await this.accountAuth.login(email, passphrase);
         if (!authenticated) {
+          await this.store.recordLoginFailure(email);
           this.audit("admin.login", { result: "denied" });
           return json(response, 401, { error: "Invalid account credentials" });
         }
+        await this.store.recordLoginSuccess(authenticated.account.id);
         this.audit("admin.login", {
           result: "accepted",
           accountId: authenticated.account.id,
@@ -513,7 +535,7 @@ export class HostedRelayService {
       }
       if (request.method === "POST" && url.pathname === "/v1/admin/logout") {
         const session = this.requireAdminMutation(request);
-        this.accountAuth.revoke(session.token);
+        await this.accountAuth.revoke(session.token);
         this.audit("admin.logout", { accountId: session.account.id });
         return json(
           response,
@@ -610,6 +632,28 @@ export class HostedRelayService {
         const roomId = requiredString(body.roomId, "Room ID", 128);
         if (!this.store.authorizeDeviceRoom(device.id, roomId)) {
           return json(response, 403, { error: "Device cannot upload to this room" });
+        }
+        const accountRoomIds = this.store
+          .rooms(device.accountId)
+          .map((room) => room.id);
+        const requestedBytes =
+          Number.isSafeInteger(body.byteLength) && body.byteLength > 0
+            ? body.byteLength
+            : 0;
+        if (
+          this.assetStore.reservedBytesForRooms(accountRoomIds) +
+            requestedBytes >
+          this.maxAccountAssetBytes
+        ) {
+          this.audit("asset.quota_blocked", {
+            deviceId: device.id,
+            roomId,
+            bytes: requestedBytes,
+          });
+          return json(response, 409, {
+            error: "Account asset storage quota reached",
+            code: "ACCOUNT_ASSET_QUOTA",
+          });
         }
         const grant = await this.assetStore.createGrant({
           roomId,

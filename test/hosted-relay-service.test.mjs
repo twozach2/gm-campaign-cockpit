@@ -32,11 +32,12 @@ async function waitFor(check, timeoutMs = 1_000) {
   throw new Error("Timed out waiting for hosted relay state");
 }
 
-async function startRelay(t, serviceOptions = {}) {
+async function startRelay(t, serviceOptions = {}, storeOptions = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "gm-hosted-relay-"));
   const store = new RelayStore({
     file: path.join(root, "relay.json"),
     logger: silentLogger,
+    ...storeOptions,
   });
   const service = new HostedRelayService({
     store,
@@ -160,6 +161,97 @@ test("hosted relay rate limits public credentials and protects metrics", async (
     1,
   );
   assert.doesNotMatch(JSON.stringify(auditEvents), /passphrase|inviteToken/i);
+});
+
+test("admin login locks an account after repeated failures", async (t) => {
+  const relay = await startRelay(
+    t,
+    {
+      rateLimits: {
+        loginPerIp: { capacity: 50, windowMs: 60_000 },
+        loginPerAccount: { capacity: 50, windowMs: 60_000 },
+      },
+    },
+    { lockout: { threshold: 3, baseMs: 60_000, maxMs: 60_000 } },
+  );
+  await relay.store.createAccount({
+    email: "dm@example.test",
+    passphrase: "correct horse battery staple",
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const bad = await adminRequest(relay, "/v1/admin/login", {
+      method: "POST",
+      body: { email: "dm@example.test", passphrase: "an incorrect passphrase" },
+    });
+    assert.equal(bad.response.status, 401);
+  }
+  const locked = await adminRequest(relay, "/v1/admin/login", {
+    method: "POST",
+    body: {
+      email: "dm@example.test",
+      passphrase: "correct horse battery staple",
+    },
+  });
+  assert.equal(locked.response.status, 423);
+  assert.ok(Number(locked.response.headers.get("retry-after")) >= 1);
+});
+
+test("admin sessions survive a relay restart on the same data directory", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "gm-relay-session-"));
+  t.after(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+  const file = path.join(root, "relay.json");
+
+  const firstStore = new RelayStore({ file, logger: silentLogger });
+  const firstService = new HostedRelayService({
+    store: firstStore,
+    host: "127.0.0.1",
+    port: 0,
+    heartbeatMs: 60_000,
+    logger: silentLogger,
+  });
+  const firstAddress = await firstService.start();
+  let firstStopped = false;
+  t.after(async () => {
+    if (!firstStopped) await firstService.stop();
+  });
+  const firstOrigin = `http://127.0.0.1:${firstAddress.port}`;
+  await firstStore.createAccount({
+    email: "dm@example.test",
+    passphrase: "correct horse battery staple",
+  });
+  const login = await fetch(`${firstOrigin}/v1/admin/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: firstOrigin },
+    body: JSON.stringify({
+      email: "dm@example.test",
+      passphrase: "correct horse battery staple",
+    }),
+  });
+  assert.equal(login.status, 200);
+  const cookie = login.headers.get("set-cookie").split(";")[0];
+  await firstService.stop();
+  firstStopped = true;
+
+  const secondStore = new RelayStore({ file, logger: silentLogger });
+  const secondService = new HostedRelayService({
+    store: secondStore,
+    host: "127.0.0.1",
+    port: 0,
+    heartbeatMs: 60_000,
+    logger: silentLogger,
+  });
+  const secondAddress = await secondService.start();
+  t.after(async () => {
+    await secondService.stop();
+  });
+  const session = await fetch(
+    `http://127.0.0.1:${secondAddress.port}/v1/admin/session`,
+    { headers: { Cookie: cookie } },
+  );
+  assert.equal(session.status, 200);
+  assert.equal((await session.json()).account.email, "dm@example.test");
 });
 
 async function bootstrap(store, email = "dm@example.test") {

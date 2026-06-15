@@ -47,13 +47,13 @@
       </section>
     </main>
 
-    <div id="lightbox" class="lightbox hidden" role="dialog" aria-label="Enlarged image">
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Enlarged image" tabindex="-1">
       <img id="lightbox-img" alt="">
     </div>
 
-    <div id="name-overlay" class="name-overlay">
+    <div id="name-overlay" class="name-overlay" role="dialog" aria-modal="true" aria-labelledby="name-overlay-title">
       <form id="name-form" class="name-card">
-        <h2>What's your name at the table?</h2>
+        <h2 id="name-overlay-title">What's your name at the table?</h2>
         <p>This shows up in chat and lets the DM whisper to you.</p>
         <input id="name-input" type="text" placeholder="e.g. Tav" maxlength="60" autocomplete="off" required>
         <button type="submit">Join the table</button>

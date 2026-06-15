@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -203,7 +203,7 @@ test("resolveFilePath resolves within campaign and blocks traversal", async () =
   await writeFile(path.join(campaignFolder, "art.png"), "fake-bytes", "utf8");
 
   const resolved = await vault.resolveFilePath("Test Campaign", "art.png");
-  assert.equal(resolved, path.join(campaignFolder, "art.png"));
+  assert.equal(resolved, await realpath(path.join(campaignFolder, "art.png")));
 
   await assert.rejects(
     () => vault.resolveFilePath("Test Campaign", "../../../etc/hosts"),

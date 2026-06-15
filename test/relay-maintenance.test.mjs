@@ -79,7 +79,7 @@ test("relay backup validates, rehearses, and restores state and assets", async (
   });
   assert.match(backup.backupDir, /relay-backup-2026-06-13T12-00-00-000Z$/);
   const verified = await validateRelayBackup(backup.backupDir);
-  assert.equal(verified.relaySchemaVersion, 2);
+  assert.equal(verified.relaySchemaVersion, 3);
   assert.equal(verified.assetSchemaVersion, 1);
 
   const rehearsal = await rehearseRelayMigration({ stateFile, assetDir });

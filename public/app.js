@@ -24,6 +24,7 @@ const state = {
   initEditing: new Set(),
   dmStreamConnecting: false,
   dmStreamReconnect: null,
+  dmStreamReconnectAttempts: 0,
   dmStreamStatus: "connecting",
   dmCsrfToken: null,
   relay: null,
@@ -520,8 +521,55 @@ function renderValidateReport({ reports, skipped }) {
   elements.validateBody.innerHTML = blocks + skippedBlock;
 }
 
+function createFocusTrap(container) {
+  if (!container) return { activate() {}, deactivate() {} };
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let restoreTo = null;
+  const focusable = () =>
+    Array.from(container.querySelectorAll(FOCUSABLE)).filter(
+      (el) => el.offsetParent !== null,
+    );
+  function onKeydown(event) {
+    if (event.key !== "Tab") return;
+    const items = focusable();
+    if (!items.length) {
+      event.preventDefault();
+      container.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+  return {
+    activate(initialFocus) {
+      restoreTo = document.activeElement;
+      container.addEventListener("keydown", onKeydown);
+      (initialFocus || focusable()[0] || container).focus();
+    },
+    deactivate() {
+      container.removeEventListener("keydown", onKeydown);
+      if (restoreTo && typeof restoreTo.focus === "function") restoreTo.focus();
+      restoreTo = null;
+    },
+  };
+}
+
+const validateTrap = createFocusTrap(elements.validateModal);
+const previewTrap = createFocusTrap(elements.previewModal);
+const relayTrap = createFocusTrap(elements.relayModal);
+const dmLoginTrap = createFocusTrap(elements.dmLogin);
+
 async function openValidate() {
   elements.validateModal.classList.remove("hidden");
+  validateTrap.activate();
   elements.validateBody.innerHTML = '<div class="loading-card">Checking documents...</div>';
   try {
     renderValidateReport(await request("/api/validate"));
@@ -532,6 +580,7 @@ async function openValidate() {
 
 function closeValidate() {
   elements.validateModal.classList.add("hidden");
+  validateTrap.deactivate();
 }
 
 async function refreshValidationBadge(campaignId) {
@@ -773,17 +822,30 @@ function updatePlayers(players) {
   }
 }
 
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
+
+function dmReconnectDelay() {
+  const exponential = Math.min(
+    RECONNECT_MAX_MS,
+    RECONNECT_BASE_MS * 2 ** state.dmStreamReconnectAttempts,
+  );
+  state.dmStreamReconnectAttempts += 1;
+  return exponential + Math.random() * exponential * 0.25;
+}
+
 function scheduleDmReconnect() {
   clearTimeout(state.dmStreamReconnect);
   setDmConnection("reconnecting");
   state.dmStreamReconnect = setTimeout(() => {
     connectDmStream();
-  }, 1000);
+  }, dmReconnectDelay());
 }
 
 function setDmConnection(nextState) {
   const previous = state.dmStreamStatus;
   state.dmStreamStatus = nextState;
+  if (nextState === "connected") state.dmStreamReconnectAttempts = 0;
   if (elements.dmConnection) {
     elements.dmConnection.dataset.state = nextState;
     elements.dmConnection.textContent =
@@ -1002,10 +1064,12 @@ function renderPreview() {
 function openPreview() {
   elements.previewModal?.classList.remove("hidden");
   renderPreview();
+  previewTrap.activate();
 }
 
 function closePreview() {
   elements.previewModal?.classList.add("hidden");
+  previewTrap.deactivate();
 }
 
 elements.previewOpen?.addEventListener("click", openPreview);
@@ -1120,6 +1184,7 @@ elements.pushTextButton?.addEventListener("click", async () => {
 });
 
 elements.clearScreen?.addEventListener("click", async () => {
+  if (!window.confirm("Clear everything from the player screen?")) return;
   try {
     await postJson("/api/reveal/clear", {});
     showToast("Player screen cleared");
@@ -1160,11 +1225,12 @@ let dmLoginResolve = null;
 function showDmLogin() {
   setDmConnection("disconnected");
   elements.dmLogin?.classList.remove("hidden");
-  elements.dmLoginPin?.focus();
+  dmLoginTrap.activate(elements.dmLoginPin);
 }
 
 function hideDmLogin() {
   elements.dmLogin?.classList.add("hidden");
+  dmLoginTrap.deactivate();
   if (elements.dmLoginError) elements.dmLoginError.textContent = "";
   if (elements.dmLoginPin) elements.dmLoginPin.value = "";
 }
@@ -1213,10 +1279,12 @@ elements.dmLogout?.addEventListener("click", async () => {
 
 function closeRelayModal() {
   elements.relayModal?.classList.add("hidden");
+  relayTrap.deactivate();
 }
 
 elements.relayOpen?.addEventListener("click", async () => {
   elements.relayModal?.classList.remove("hidden");
+  relayTrap.activate();
   try {
     await loadRelayState();
   } catch (error) {

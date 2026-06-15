@@ -3,6 +3,9 @@ import { openTicketedEventSource } from "/stream-connection.mjs";
 
 const NAME_KEY = "gm-cockpit:player-name";
 const SESSION_KEY = "gm-cockpit:player-session";
+const MAX_CHAT_NODES = 200;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
 
 const elements = {
   nav: document.querySelector("#player-nav"),
@@ -29,6 +32,50 @@ const elements = {
   connection: document.querySelector("#player-connection"),
 };
 
+function createFocusTrap(container) {
+  if (!container) return { activate() {}, deactivate() {} };
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let restoreTo = null;
+  const focusable = () =>
+    Array.from(container.querySelectorAll(FOCUSABLE)).filter(
+      (el) => el.offsetParent !== null,
+    );
+  function onKeydown(event) {
+    if (event.key !== "Tab") return;
+    const items = focusable();
+    if (!items.length) {
+      event.preventDefault();
+      container.focus();
+      return;
+    }
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
+  return {
+    activate(initialFocus) {
+      restoreTo = document.activeElement;
+      container.addEventListener("keydown", onKeydown);
+      (initialFocus || focusable()[0] || container).focus();
+    },
+    deactivate() {
+      container.removeEventListener("keydown", onKeydown);
+      if (restoreTo && typeof restoreTo.focus === "function") restoreTo.focus();
+      restoreTo = null;
+    },
+  };
+}
+
+const lightboxTrap = createFocusTrap(elements.lightbox);
+const nameTrap = createFocusTrap(elements.overlay);
+
 let name = "";
 try { name = localStorage.getItem(NAME_KEY) || ""; } catch { name = ""; }
 let token = "";
@@ -36,6 +83,7 @@ try { token = localStorage.getItem(SESSION_KEY) || ""; } catch { token = ""; }
 let player = null;
 let eventSource = null;
 let reconnectTimer = null;
+let reconnectAttempts = 0;
 let connecting = false;
 let connectionStatus = "connecting";
 const renderedIds = new Set();
@@ -135,11 +183,20 @@ elements.feed.addEventListener("click", (event) => {
   if (!image) return;
   elements.lightboxImg.src = image.src;
   elements.lightbox.classList.remove("hidden");
+  lightboxTrap.activate();
 });
 
-elements.lightbox.addEventListener("click", () => {
+function closeLightbox() {
+  if (elements.lightbox.classList.contains("hidden")) return;
   elements.lightbox.classList.add("hidden");
   elements.lightboxImg.src = "";
+  lightboxTrap.deactivate();
+}
+
+elements.lightbox.addEventListener("click", closeLightbox);
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeLightbox();
 });
 
 function messageLabel(message) {
@@ -152,6 +209,16 @@ function messageLabel(message) {
   return `${escapeHtml(message.from || "Anon")} whispers to the DM`;
 }
 
+function trimChatLog() {
+  while (elements.chatLog.childElementCount > MAX_CHAT_NODES) {
+    const oldest = elements.chatLog.firstElementChild;
+    if (!oldest) break;
+    const id = Number(oldest.dataset.msgId);
+    if (Number.isFinite(id)) renderedIds.delete(id);
+    oldest.remove();
+  }
+}
+
 function appendMessage(message) {
   if (!message || renderedIds.has(message.id)) return;
   renderedIds.add(message.id);
@@ -159,9 +226,11 @@ function appendMessage(message) {
   const isRoll = message.type === "roll";
   const node = document.createElement("div");
   node.className = `chat-msg${isWhisper ? " whisper" : ""}${isRoll ? " roll" : ""}`;
+  node.dataset.msgId = String(message.id);
   const body = isRoll ? rollHtml(message.roll) : escapeHtml(message.text || "");
   node.innerHTML = `<span class="chat-from">${messageLabel(message)}</span><span class="chat-text">${body}</span>`;
   elements.chatLog.appendChild(node);
+  trimChatLog();
   elements.chatLog.scrollTop = elements.chatLog.scrollHeight;
   bumpUnread("chat");
 }
@@ -212,17 +281,27 @@ async function sync() {
   syncing = false;
 }
 
+function reconnectDelay() {
+  const exponential = Math.min(
+    RECONNECT_MAX_MS,
+    RECONNECT_BASE_MS * 2 ** reconnectAttempts,
+  );
+  reconnectAttempts += 1;
+  return exponential + Math.random() * exponential * 0.25;
+}
+
 function scheduleReconnect() {
   clearTimeout(reconnectTimer);
   setConnectionStatus("reconnecting");
   reconnectTimer = setTimeout(() => {
     connect();
-  }, 1000);
+  }, reconnectDelay());
 }
 
 function setConnectionStatus(nextState) {
   const previous = connectionStatus;
   connectionStatus = nextState;
+  if (nextState === "connected") reconnectAttempts = 0;
   if (elements.connection) {
     elements.connection.dataset.state = nextState;
     elements.connection.textContent =
@@ -333,6 +412,7 @@ async function setName(value) {
     }
     applyPlayer(data.player);
     elements.overlay.classList.add("hidden");
+    nameTrap.deactivate();
     await sync();
     connect();
   } catch (error) {
@@ -348,7 +428,7 @@ function promptForName() {
   setConnectionStatus("disconnected");
   elements.overlay.classList.remove("hidden");
   elements.nameInput.value = name;
-  elements.nameInput.focus();
+  nameTrap.activate(elements.nameInput);
 }
 
 elements.nameForm.addEventListener("submit", async (event) => {
@@ -391,6 +471,7 @@ async function start() {
   try {
     await sync();
     elements.overlay.classList.add("hidden");
+    nameTrap.deactivate();
     connect();
   } catch (error) {
     clearSession();

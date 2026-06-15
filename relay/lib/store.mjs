@@ -29,6 +29,12 @@ const DEFAULT_CAPACITY = Object.freeze({
   activeMembershipsPerRoom: 200,
   pendingPairingsPerAccount: 10,
 });
+const DEFAULT_LOCKOUT = Object.freeze({
+  threshold: 10,
+  baseMs: 15 * 60 * 1_000,
+  maxMs: 24 * 60 * 60 * 1_000,
+});
+const MAX_LOCK_EXPONENT = 20;
 
 function clone(value) {
   return structuredClone(value);
@@ -137,7 +143,10 @@ export function validRelayDatabase(value) {
             account.passwordSalt.length >= 16 &&
             typeof account.passwordHash === "string" &&
             account.passwordHash.length >= 32)) &&
-        validTimestamp(account.createdAt),
+        validTimestamp(account.createdAt) &&
+        Number.isSafeInteger(account.failedLoginCount) &&
+        account.failedLoginCount >= 0 &&
+        validNullableTimestamp(account.lockedUntil),
     )
   ) {
     return false;
@@ -334,12 +343,14 @@ export class RelayStore {
     randomSecret = secret,
     logger,
     capacity = {},
+    lockout = {},
   }) {
     this.now = now;
     this.randomId = randomId;
     this.randomSecret = randomSecret;
     this.logger = logger;
     this.capacity = { ...DEFAULT_CAPACITY, ...capacity };
+    this.lockout = { ...DEFAULT_LOCKOUT, ...lockout };
     this.database = emptyRelayDatabase();
     this.tail = Promise.resolve();
     this.store = new AtomicJsonStore({
@@ -458,6 +469,8 @@ export class RelayStore {
         status: "active",
         passwordSalt,
         passwordHash,
+        failedLoginCount: 0,
+        lockedUntil: null,
         createdAt: this.now(),
       };
       draft.accounts.push(account);
@@ -505,6 +518,89 @@ export class RelayStore {
       (entry) => entry.id === accountId && entry.status === "active",
     );
     return account ? publicAccount(account) : null;
+  }
+
+  accountByEmail(email) {
+    const normalized = String(email || "").trim().toLowerCase();
+    if (!normalized) return null;
+    const account = this.database.accounts.find(
+      (entry) => entry.email === normalized && entry.status === "active",
+    );
+    return account ? publicAccount(account) : null;
+  }
+
+  accountLockState(email) {
+    const normalized = String(email || "").trim().toLowerCase();
+    const account = this.database.accounts.find(
+      (entry) => entry.email === normalized && entry.status === "active",
+    );
+    if (!account || account.lockedUntil === null) {
+      return { locked: false, lockedUntil: null, retryAfterMs: 0 };
+    }
+    const retryAfterMs = account.lockedUntil - this.now();
+    if (retryAfterMs <= 0) {
+      return { locked: false, lockedUntil: account.lockedUntil, retryAfterMs: 0 };
+    }
+    return { locked: true, lockedUntil: account.lockedUntil, retryAfterMs };
+  }
+
+  recordLoginFailure(email) {
+    const normalized = String(email || "").trim().toLowerCase();
+    const exists = this.database.accounts.some(
+      (entry) => entry.email === normalized && entry.status === "active",
+    );
+    if (!exists) {
+      return Promise.resolve({
+        locked: false,
+        lockedUntil: null,
+        failedLoginCount: 0,
+      });
+    }
+    return this.transact((draft) => {
+      const account = draft.accounts.find(
+        (entry) => entry.email === normalized && entry.status === "active",
+      );
+      account.failedLoginCount += 1;
+      if (account.failedLoginCount >= this.lockout.threshold) {
+        const exponent = Math.min(
+          account.failedLoginCount - this.lockout.threshold,
+          MAX_LOCK_EXPONENT,
+        );
+        const lockMs = Math.min(
+          this.lockout.baseMs * 2 ** exponent,
+          this.lockout.maxMs,
+        );
+        account.lockedUntil = this.now() + lockMs;
+      }
+      return {
+        locked:
+          account.lockedUntil !== null && account.lockedUntil > this.now(),
+        lockedUntil: account.lockedUntil,
+        failedLoginCount: account.failedLoginCount,
+      };
+    });
+  }
+
+  recordLoginSuccess(accountId) {
+    const current = this.database.accounts.find(
+      (entry) => entry.id === accountId && entry.status === "active",
+    );
+    if (
+      !current ||
+      (current.failedLoginCount === 0 && current.lockedUntil === null)
+    ) {
+      return Promise.resolve(false);
+    }
+    return this.transact((draft) => {
+      const account = draft.accounts.find(
+        (entry) => entry.id === accountId && entry.status === "active",
+      );
+      if (account) {
+        account.failedLoginCount = 0;
+        account.lockedUntil = null;
+      }
+      return true;
+    });
   }
 
   createDevice({ accountId, name }) {

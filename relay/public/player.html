@@ -47,14 +47,14 @@
       </section>
     </main>
 
-    <div id="lightbox" class="lightbox hidden" role="dialog" aria-label="Enlarged image">
+    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true" aria-label="Enlarged image" tabindex="-1">
       <img id="lightbox-img" alt="">
     </div>
 
-    <div id="join-overlay" class="join-overlay">
+    <div id="join-overlay" class="join-overlay" role="dialog" aria-modal="true" aria-labelledby="join-overlay-title">
       <form id="join-form" class="join-card">
         <span class="eyebrow">Remote player access</span>
-        <h1>Join the table</h1>
+        <h1 id="join-overlay-title">Join the table</h1>
         <p>Enter the private invite from your DM. Your session is valid only for this room.</p>
         <label>
           <span>Invite code</span>
@@ -69,10 +69,10 @@
       </form>
     </div>
 
-    <div id="rename-overlay" class="join-overlay hidden">
+    <div id="rename-overlay" class="join-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="rename-overlay-title">
       <form id="rename-form" class="join-card">
         <span class="eyebrow">Player identity</span>
-        <h2>Change your name</h2>
+        <h2 id="rename-overlay-title">Change your name</h2>
         <label>
           <span>Display name</span>
           <input id="rename-name" maxlength="60" autocomplete="nickname" required>

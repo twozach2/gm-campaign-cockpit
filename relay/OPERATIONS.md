@@ -46,6 +46,11 @@ missing, altered, unlisted, or schema-invalid. Restore preserves timestamped
 pre-restore copies beside the live state. Keep daily encrypted backups for 30
 days, copy them to a separate failure domain, and rehearse restore monthly.
 
+The admin session store (`sessions.json`, beside the database) is intentionally
+outside the backup unit. It holds only hashed session keys, survives an ordinary
+restart, and is safe to lose: DMs simply sign in again. Do not restore it from a
+backup.
+
 After restore, start the relay and verify `/readiness`, account login, room
 state, and one authorized asset download before reopening traffic.
 
@@ -84,8 +89,21 @@ WebSocket access is revoked.
 invites, connections, and room assets are invalidated.
 
 **Suspected account compromise:** block public traffic at the proxy, preserve
-logs, rotate the account passphrase through an offline administrative
-procedure, revoke all devices, and create fresh rooms and invites.
+logs, rotate the account passphrase with the offline reset command below,
+revoke all devices, and create fresh rooms and invites.
+
+**Forgotten or rotated passphrase:** run the operator reset from the relay host
+while the relay is stopped. The new passphrase is read from the environment so
+it never appears in shell history or process arguments:
+
+```bash
+RELAY_RESET_PASSPHRASE="choose-a-long-account-passphrase" \
+  npm run relay:reset-passphrase -- "dm@example.com"
+```
+
+The command rewrites only the account's salted passphrase hash and prints the
+opaque account ID. Existing device, room, and player capabilities are
+unaffected; revoke them separately if compromise is suspected.
 
 **Cross-room disclosure or integrity failure:** stop the relay, preserve the
 state and logs, restore the last known-good backup if needed, and do not reopen

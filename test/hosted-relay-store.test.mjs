@@ -109,9 +109,9 @@ test("relay store migrates schema zero before becoming ready", async (t) => {
       accounts: [],
     },
   });
-  assert.equal(store.snapshot().schemaVersion, 2);
+  assert.equal(store.snapshot().schemaVersion, 3);
   const persisted = JSON.parse(await readFile(file, "utf8"));
-  assert.equal(persisted.schemaVersion, 2);
+  assert.equal(persisted.schemaVersion, 3);
   assert.deepEqual(persisted.devices, []);
   assert.deepEqual(persisted.roomStates, []);
   assert.deepEqual(persisted.pairings, []);
@@ -287,6 +287,57 @@ test("account passwords authenticate without exposing password material", async 
   const persisted = await readFile(file, "utf8");
   assert.doesNotMatch(persisted, /a sufficiently long passphrase/);
   assert.match(persisted, /passwordHash/);
+});
+
+test("login lockout escalates, persists, expires, and resets on success", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "gm-relay-lock-"));
+  const file = path.join(root, "relay-state.json");
+  let clock = 1_000;
+  const store = new RelayStore({
+    file,
+    now: () => clock,
+    lockout: { threshold: 3, baseMs: 1_000, maxMs: 8_000 },
+    ...deterministicValues(),
+  });
+  await store.init();
+  t.after(async () => {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const account = await store.createAccount({
+    email: "lock@example.test",
+    passphrase: "a sufficiently long passphrase",
+  });
+  assert.equal(store.accountLockState("lock@example.test").locked, false);
+
+  await store.recordLoginFailure("lock@example.test");
+  await store.recordLoginFailure("LOCK@example.test");
+  const third = await store.recordLoginFailure("lock@example.test");
+  assert.equal(third.locked, true);
+  assert.equal(third.lockedUntil, 2_000);
+  assert.equal(store.accountLockState("lock@example.test").locked, true);
+
+  const unknown = await store.recordLoginFailure("nobody@example.test");
+  assert.equal(unknown.locked, false);
+  assert.equal(unknown.failedLoginCount, 0);
+
+  clock = 2_001;
+  assert.equal(store.accountLockState("lock@example.test").locked, false);
+  const fourth = await store.recordLoginFailure("lock@example.test");
+  assert.equal(fourth.locked, true);
+  assert.equal(fourth.lockedUntil, clock + 2_000);
+
+  await store.recordLoginSuccess(account.id);
+  assert.equal(store.accountLockState("lock@example.test").locked, false);
+  const reset = await store.recordLoginFailure("lock@example.test");
+  assert.equal(reset.failedLoginCount, 1);
+  assert.equal(reset.locked, false);
+
+  const onDisk = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(onDisk.schemaVersion, 3);
+  assert.equal(onDisk.accounts[0].failedLoginCount, 1);
+  assert.equal(onDisk.accounts[0].lockedUntil, null);
 });
 
 test("pairing capabilities are expiring and single-use", async (t) => {
